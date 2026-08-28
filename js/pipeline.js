@@ -28,7 +28,11 @@ export class ScreenPipeline {
 		this.maxMisses = opts.maxMisses ?? 6;
 		this.minEdgeFrac = opts.minEdgeFrac ?? 0.06;
 		this.minAreaFrac = opts.minAreaFrac ?? 0.02;
-		this.aspectSmoothing = opts.aspectSmoothing ?? 0.1;
+		// Slow, and gated against sudden changes: the first estimate at lock is
+		// taken as-is, and after that a real screen keeps the shape it had.
+		this.aspectSmoothing = opts.aspectSmoothing ?? 0.06;
+		this.aspectJump = opts.aspectJump ?? Math.log(1.25);
+		this.outlierWeight = opts.outlierWeight ?? 0.15;
 		this.lead = opts.lead ?? 0.8;
 		this.sanityEvery = opts.sanityEvery ?? 20;
 		this.sanityGrowth = opts.sanityGrowth ?? 1.35;
@@ -46,6 +50,8 @@ export class ScreenPipeline {
 		this.candidateHits = 0;
 		this.measured = null;
 		this.previous = null;
+		this.aspectMethod = null;
+		this.slips = 0;
 		this.frame = 0;
 		this.acquirer.reset();
 		this.smoother.reset();
@@ -98,15 +104,34 @@ export class ScreenPipeline {
 		return true;
 	}
 
+	// The measured shape of the screen, averaged over time.
+	//
+	// The vanishing-point construction is exact when it works and unstable when
+	// the view drifts towards straight-on: a handful of frames in every few
+	// hundred come back degenerate even while tracking is perfect, and blending
+	// those in visibly stretches the picture. Ones that came out clamped, or
+	// that had to borrow an assumed focal length, are therefore dropped.
+	//
+	// Readings that merely disagree are treated differently from readings that
+	// are invalid. They are damped, not rejected: rejecting them outright would
+	// mean that one bad value taken at lock could never be corrected, since
+	// every later reading - including all the right ones - would look like the
+	// outlier. Damped, a lone spike barely moves the output while a persistent
+	// disagreement still wins within a few seconds.
 	updateAspect(quad, immediate = false) {
 		const est = estimateAspect(quad, {
 			principal: [this.w / 2, this.h / 2],
 			focal: this.assumedFocal,
 		});
-		if (!est) return;
-		this.aspect = this.aspect === null || immediate
-			? est.aspect
-			: this.aspect + (est.aspect - this.aspect) * this.aspectSmoothing;
+		if (!est || est.clamped || est.method === 'assumed-focal') return;
+		if (this.aspect === null || immediate) {
+			this.aspect = est.aspect;
+			this.aspectMethod = est.method;
+			return;
+		}
+		const disagreement = Math.abs(Math.log(est.aspect / this.aspect));
+		const weight = this.aspectSmoothing * (disagreement > this.aspectJump ? this.outlierWeight : 1);
+		this.aspect += (est.aspect - this.aspect) * weight;
 		this.aspectMethod = est.method;
 	}
 
@@ -184,7 +209,7 @@ export class ScreenPipeline {
 			this.measured = fresh;
 			this.previous = null;
 			this.smoother.reset(fresh);
-			this.slips = (this.slips ?? 0) + 1;
+			this.slips++;
 		}
 	}
 
@@ -195,6 +220,7 @@ export class ScreenPipeline {
 			candidate: this.candidate,
 			confidence: this.confidence,
 			aspect: this.aspect,
+			slips: this.slips,
 			coasting: this.state === LOCKED && this.misses > 0,
 		};
 	}

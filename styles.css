@@ -93,12 +93,12 @@ button.big { padding: 0.85rem 1.5rem; font-size: 1.05rem; width: 100%; }
 	left: 50%;
 	right: auto;
 	transform: translate(-50%, -50%);
+	/* Width leads; if that would make it taller than the screen, the browser
+	   scales the width back down and the picture keeps its proportions. */
 	width: min(94vw, 40rem);
 	max-height: 70vh;
-	object-fit: contain;
 	border-color: #ffd166;
 }
-.preview.hidden { display: none; }
 
 .controls {
 	position: absolute;

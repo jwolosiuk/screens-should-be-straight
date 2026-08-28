@@ -37,15 +37,26 @@ test('locks onto a screen held in view, then follows the camera for 150 frames',
 test('reports the true 16:9 shape of the screen, not its shape in the image', () => {
 	const pipe = new ScreenPipeline(W, H);
 	assert.ok(acquire(pipe) !== null);
-	for (let i = 1; i <= 60; i++) pipe.update(frameAt(i));
-	assert.ok(pipe.aspect, 'no aspect estimate');
-	assert.ok(Math.abs(pipe.aspect - 16 / 9) / (16 / 9) < 0.08, `aspect ${pipe.aspect}`);
-	// The quad in the image is visibly narrower than 16:9 at this angle, which
-	// is the whole reason the estimate has to be geometric.
-	const q = pipe.quad;
-	const imageRatio = Math.hypot(q[1][0] - q[0][0], q[1][1] - q[0][1]) /
-		Math.hypot(q[3][0] - q[0][0], q[3][1] - q[0][1]);
-	assert.ok(Math.abs(imageRatio - 16 / 9) > 0.15, `image ratio ${imageRatio} was already correct`);
+	// Long enough for the vanishing-point construction to hit its unstable
+	// patches: a few frames in every few hundred come back degenerate even while
+	// tracking is perfect, and averaging those in used to stretch the picture.
+	let worstReported = 0, mostSkewed = 0;
+	for (let i = 1; i <= 300; i++) {
+		const out = pipe.update(frameAt(i));
+		assert.ok(pipe.aspect, `no aspect estimate at frame ${i}`);
+		worstReported = Math.max(worstReported, Math.abs(pipe.aspect - 16 / 9) / (16 / 9));
+		// What the quad's own proportions would suggest, which is the answer
+		// this whole construction exists to avoid.
+		const q = out.quad;
+		const naive = Math.hypot(q[1][0] - q[0][0], q[1][1] - q[0][1])
+			/ Math.hypot(q[3][0] - q[0][0], q[3][1] - q[0][1]);
+		mostSkewed = Math.max(mostSkewed, Math.abs(naive - 16 / 9) / (16 / 9));
+	}
+	assert.ok(worstReported < 0.035, `reported aspect drifted by ${(worstReported * 100).toFixed(1)}%`);
+	assert.ok(mostSkewed > 0.1, `the view was never angled enough to test anything (${mostSkewed})`);
+	assert.ok(mostSkewed > 3 * worstReported,
+		`geometry should beat the quad's own proportions by more than this: `
+		+ `${(mostSkewed * 100).toFixed(1)}% vs ${(worstReported * 100).toFixed(1)}%`);
 });
 
 test('coasts through a brief blackout, gives up on a long one, then re-acquires', () => {
@@ -94,4 +105,17 @@ test('an empty room never claims a lock', () => {
 		const out = pipe.update(renderScene({ w: W, h: H, quad, content: darkPixel, room: 22, seed: i }));
 		assert.equal(out.state, SEARCHING);
 	}
+});
+
+test('a wrong shape reading corrects itself instead of sticking', () => {
+	const pipe = new ScreenPipeline(W, H);
+	assert.ok(acquire(pipe) !== null);
+	// Whatever the reading at lock happened to be, pretend it was badly wrong -
+	// a single unlucky frame can do this. Every later reading now looks like an
+	// outlier, which is exactly the situation where rejecting outliers would
+	// leave the picture permanently stretched.
+	pipe.aspect = 3.1;
+	for (let i = 1; i <= 300; i++) pipe.update(frameAt(i));
+	assert.ok(Math.abs(pipe.aspect - 16 / 9) / (16 / 9) < 0.05,
+		`did not recover from a bad initial reading: ${pipe.aspect}`);
 });

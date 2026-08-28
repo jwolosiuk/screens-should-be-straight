@@ -28,6 +28,3 @@ export function bilinear(gray, x, y) {
 	return (a * (1 - fx) + b * fx) * (1 - fy) + (c * (1 - fx) + d * fx) * fy;
 }
 
-export function scaleQuad(quad, sx, sy) {
-	return quad.map(([x, y]) => [x * sx, y * sy]);
-}

@@ -51,12 +51,10 @@ export class Acquirer {
 		this.labels = new Int32Array(w * h);
 		this.stack = new Int32Array(w * h);
 		this.hist = new Int32Array(256);
-		this.frames = 0;
 	}
 
 	reset() {
 		this.peak.fill(0);
-		this.frames = 0;
 	}
 
 	push(gray) {
@@ -66,7 +64,6 @@ export class Acquirer {
 			const faded = peak[i] * decay;
 			peak[i] = d[i] > faded ? d[i] : faded;
 		}
-		this.frames++;
 	}
 
 	// Largest 4-connected blob of pixels above the threshold. Returns its size

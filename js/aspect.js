@@ -54,7 +54,8 @@ export function estimateAspect(quad, opts = {}) {
 	// quad is already a scaled rectangle.
 	if (Math.abs(n2[2]) < 1e-6 && Math.abs(n3[2]) < 1e-6) {
 		const a = Math.sqrt((n2[0] * n2[0] + n2[1] * n2[1]) / (n3[0] * n3[0] + n3[1] * n3[1]));
-		return isFinite(a) && a > 0 ? { aspect: clamp(a, min, max), focal: null, method: 'affine' } : null;
+		if (!isFinite(a) || a <= 0) return null;
+		return { aspect: clamp(a, min, max), clamped: a < min || a > max, focal: null, method: 'affine' };
 	}
 
 	let focal = null;
@@ -82,7 +83,9 @@ export function estimateAspect(quad, opts = {}) {
 	if (denom3 < 1e-12) return null;
 	const aspect = Math.sqrt(norm(n2) / denom3);
 	if (!isFinite(aspect) || aspect <= 0) return null;
-	return { aspect: clamp(aspect, min, max), focal, method };
+	// A clamped answer is not a slightly-wrong answer, it is a failed one: the
+	// construction has gone unstable and the caller should keep what it had.
+	return { aspect: clamp(aspect, min, max), clamped: aspect < min || aspect > max, focal, method };
 }
 
 const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));

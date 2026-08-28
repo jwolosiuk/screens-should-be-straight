@@ -17,8 +17,13 @@ void main() {
 	gl_Position = vec4(aPos.x * 2.0 - 1.0, 1.0 - aPos.y * 2.0, 0.0, 1.0);
 }`;
 
-const FRAGMENT_SHADER = `
-precision mediump float;
+// Texture coordinates come out of a division per pixel, so precision here is
+// not cosmetic: at mediump (about three decimal digits) the sampling point
+// drifts by a pixel or two across a large output and the picture crawls.
+// highp is near-universal on phone GPUs now, but WebGL1 does not guarantee it
+// in fragment shaders, hence the check.
+const FRAGMENT_SHADER = (precision) => `
+precision ${precision} float;
 uniform sampler2D uTex;
 uniform mat3 uH;
 varying vec2 vUV;
@@ -52,7 +57,9 @@ export class WarpRenderer {
 
 		const program = gl.createProgram();
 		gl.attachShader(program, compile(gl, gl.VERTEX_SHADER, VERTEX_SHADER));
-		gl.attachShader(program, compile(gl, gl.FRAGMENT_SHADER, FRAGMENT_SHADER));
+		const highp = gl.getShaderPrecisionFormat?.(gl.FRAGMENT_SHADER, gl.HIGH_FLOAT);
+		this.precision = highp && highp.precision > 0 ? 'highp' : 'mediump';
+		gl.attachShader(program, compile(gl, gl.FRAGMENT_SHADER, FRAGMENT_SHADER(this.precision)));
 		gl.linkProgram(program);
 		if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
 			throw new Error(`link: ${gl.getProgramInfoLog(program)}`);

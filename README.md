@@ -57,7 +57,12 @@ both the camera's focal length and the true proportions of the rectangle
 (Zhang & He, *Whiteboard Scanning and Image Enhancement*, 2007), so the output
 shape is measured rather than assumed. Near a straight-on view there are no
 vanishing points to measure, which is also the case where the quad is already
-almost correct, so it falls back cleanly.
+almost correct, so it falls back cleanly. The construction goes unstable on a
+few frames in every few hundred even while tracking is perfect, so readings
+that come back out of range are dropped, and readings that merely disagree are
+damped rather than rejected - rejecting them would let one unlucky value taken
+at the moment of lock stretch the picture permanently, since every later
+reading would then look like the outlier.
 
 **Render** (`js/render.js`). The un-warp itself is a WebGL fragment shader: for
 each pixel of the output rectangle, the homography says where to read in the
@@ -80,8 +85,9 @@ full-resolution video.
 - **Rotate** — 90° steps, for a phone held sideways or a screen mounted in
   portrait.
 - **Re-scan** — forget the current outline and search again.
-- Tapping the status pill toggles a small stats panel (state, confidence,
-  measured aspect ratio, frame rate).
+- **Stats** shows what the tracker is doing: state, confidence, the measured
+  aspect ratio and how it was arrived at, how often the outline had to be
+  re-seeded, and the frame rate.
 
 Known limits: the screen has to be brighter than its surroundings, which is the
 assumption acquisition is built on. If more than one edge of the screen leaves

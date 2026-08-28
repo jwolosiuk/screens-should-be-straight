@@ -31,6 +31,18 @@ test('a near straight-on view falls back instead of dividing by nothing', () => 
 	assert.ok(Math.abs(est.aspect - 16 / 9) / (16 / 9) < 0.05, `aspect ${est.aspect} via ${est.method}`);
 });
 
+test('an unstable answer says so instead of quietly returning a clamped one', () => {
+	// A sliver of a quad: the construction still produces a number, but not one
+	// any real screen could have.
+	const est = estimateAspect([[10, 10], [300, 12], [299, 16], [11, 14]], {
+		principal, focal: focalFromFov(320),
+	});
+	assert.ok(est, 'expected an estimate to inspect');
+	assert.ok(est.clamped, 'a wildly out-of-range answer should be flagged');
+	const sane = orderQuad(projectRect({ aspect: 16 / 9, yaw: 0.6, pitch: 0.25, focal: 700, principal }));
+	assert.equal(estimateAspect(sane, { principal, focal: focalFromFov(320) }).clamped, false);
+});
+
 test('nonsense input is rejected', () => {
 	assert.equal(estimateAspect(null), null);
 	assert.equal(estimateAspect([[0, 0], [1, 0], [2, 0], [3, 0]]), null);

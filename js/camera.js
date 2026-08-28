@@ -62,8 +62,4 @@ export class FrameSampler {
 	toNormalized(quad) {
 		return quad.map(([x, y]) => [x / this.w, y / this.h]);
 	}
-
-	fromNormalized(quad) {
-		return quad.map(([x, y]) => [x * this.w, y * this.h]);
-	}
 }

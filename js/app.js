@@ -9,11 +9,11 @@ import { WarpRenderer } from './render.js';
 const $ = (id) => document.getElementById(id);
 const els = {
 	intro: $('intro'), stage: $('stage'), video: $('camera'), output: $('output'),
-	preview: $('preview'), hint: $('hint'), stats: $('stats'), error: $('error'),
+	preview: $('preview'), hint: $('hint'), statsPanel: $('stats'), error: $('error'),
 	adjustBar: $('adjust-bar'),
 	start: $('btn-start'), rescan: $('btn-rescan'), adjust: $('btn-adjust'),
 	shape: $('btn-shape'), rotate: $('btn-rotate'), fullscreen: $('btn-fullscreen'),
-	stop: $('btn-stop'), apply: $('adjust-apply'), cancel: $('adjust-cancel'),
+	stats: $('btn-stats'), stop: $('btn-stop'), apply: $('adjust-apply'), cancel: $('adjust-cancel'),
 };
 
 const SHAPES = [
@@ -44,7 +44,10 @@ async function start() {
 		app.stream = await startCamera(els.video);
 		app.sampler = new FrameSampler(els.video.videoWidth, els.video.videoHeight);
 		app.pipeline = new ScreenPipeline(app.sampler.w, app.sampler.h);
-		app.renderer = new WarpRenderer(els.output);
+		// One GL context per canvas for the life of the page: asking for another
+		// hands back the same one, and re-linking the program on every restart
+		// would just leak shaders into it.
+		app.renderer ??= new WarpRenderer(els.output);
 		app.preview = new Preview(els.preview);
 		app.preview.setSourceSize(app.sampler.w, app.sampler.h);
 	} catch (err) {
@@ -94,9 +97,8 @@ function schedule() {
 
 const rotateQuad = (quad, k) => quad.slice(k).concat(quad.slice(0, k));
 
-function outputAspect(quad) {
-	const fixed = SHAPES[app.shape].ratio;
-	const measured = fixed ?? app.pipeline.aspect ?? els.video.videoWidth / els.video.videoHeight;
+function outputAspect() {
+	const measured = SHAPES[app.shape].ratio ?? app.pipeline.aspect ?? 16 / 9;
 	return app.rotation % 2 ? 1 / measured : measured;
 }
 
@@ -109,7 +111,7 @@ function frame(now = performance.now()) {
 	renderer.resize(els.stage.clientWidth, els.stage.clientHeight, Math.min(window.devicePixelRatio || 1, 2));
 	if (result.state === LOCKED && result.quad) {
 		const quad = rotateQuad(sampler.toNormalized(result.quad), app.rotation);
-		renderer.draw(els.video, quad, outputAspect(result.quad));
+		renderer.draw(els.video, quad, outputAspect());
 	} else {
 		// Nothing found yet: show the camera as it is, so the user can aim.
 		renderer.draw(els.video, FULL_FRAME, els.video.videoWidth / els.video.videoHeight);
@@ -149,12 +151,13 @@ function updateStats(result, now) {
 		app.frames = 0;
 		app.lastFpsAt = now;
 	}
-	if (els.stats.hidden) return;
+	if (els.statsPanel.hidden) return;
 	const aspect = app.pipeline.aspect;
-	els.stats.textContent = [
+	els.statsPanel.textContent = [
 		`state      ${result.state}${result.coasting ? ' (coasting)' : ''}`,
 		`confidence ${result.confidence.toFixed(2)}`,
 		`aspect     ${aspect ? aspect.toFixed(3) : '-'} (${app.pipeline.aspectMethod ?? '-'})`,
+		`re-seeds   ${result.slips}`,
 		`analysis   ${app.sampler.w}x${app.sampler.h} from ${els.video.videoWidth}x${els.video.videoHeight}`,
 		`fps        ${app.fps}`,
 	].join('\n');
@@ -213,7 +216,7 @@ function onPointerUp(event) {
 function applyHandles() {
 	const quad = orderQuad(app.handles);
 	if (!isConvex(quad) || !app.pipeline.seed(quad)) {
-		els.hint.textContent = 'Those corners cross over each other - try again';
+		els.hint.textContent = 'Those four corners do not make a screen - try again';
 		return;
 	}
 	setAdjusting(false);
@@ -236,11 +239,19 @@ els.fullscreen.addEventListener('click', () => {
 	if (document.fullscreenElement) document.exitFullscreen();
 	else document.documentElement.requestFullscreen?.().catch(() => {});
 });
-els.hint.addEventListener('click', () => { els.stats.hidden = !els.stats.hidden; });
+els.stats.addEventListener('click', () => { els.statsPanel.hidden = !els.statsPanel.hidden; });
 els.preview.addEventListener('pointerdown', onPointerDown);
 els.preview.addEventListener('pointermove', onPointerMove);
 els.preview.addEventListener('pointerup', onPointerUp);
 els.preview.addEventListener('pointercancel', onPointerUp);
+
+// Losing the GL context (backgrounded app, driver reset) leaves a canvas that
+// silently draws nothing, which would look like the tracker breaking.
+els.output.addEventListener('webglcontextlost', (event) => {
+	event.preventDefault();
+	stop();
+	fail('The graphics context was lost. Start the camera again.');
+});
 
 if (!document.documentElement.requestFullscreen) els.fullscreen.hidden = true;
 if (!window.isSecureContext) {

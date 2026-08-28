@@ -12,7 +12,7 @@
 // contrast edge inside the movie itself, which is the failure mode that makes
 // naive edge tracking jitter.
 
-import { fitLineRobust, inwardNormal, isConvex, lineIntersect } from './geom.js';
+import { fitLineRobust, inwardNormal, isConvex, lineIntersect, signedArea } from './geom.js';
 import { bilinear } from './image.js';
 
 const lineThrough = (p0, p1) => {
@@ -130,6 +130,9 @@ export function trackQuad(gray, prevQuad, opts = {}) {
 		if (!corner) return null;
 		quad.push(corner);
 	}
-	if (!isConvex(quad)) return null;
+	// Convex is not enough: intersecting edge lines can hand back a quad wound
+	// the other way, and every "inward" decision downstream would then point
+	// out of the screen.
+	if (!isConvex(quad) || signedArea(quad) <= 0) return null;
 	return { quad, confidence: inlierTotal / (samples * 4), weakEdges };
 }
