@@ -33,7 +33,6 @@ export class ScreenPipeline {
 		this.minCoverage = opts.minCoverage ?? 0.02;
 		this.minInteriorLuma = opts.minInteriorLuma ?? 45;
 		this.minEdgeFrac = opts.minEdgeFrac ?? 0.06;
-		this.minAreaFrac = opts.minAreaFrac ?? 0.02;
 		// Slow, and gated against sudden changes: the first estimate at lock is
 		// taken as-is, and after that a real screen keeps the shape it had.
 		this.aspectSmoothing = opts.aspectSmoothing ?? 0.04;
