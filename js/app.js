@@ -1,6 +1,6 @@
 // Wiring: camera in, pipeline in the middle, warped picture out.
 
-import { startCamera, stopCamera, CAMERA_ERRORS, FrameSampler } from './camera.js';
+import { applyZoom, startCamera, stopCamera, zoomRange, CAMERA_ERRORS, FrameSampler } from './camera.js';
 import { isConvex, orderQuad } from './geom.js';
 import { LOCKED, ScreenPipeline } from './pipeline.js';
 import { Preview } from './preview.js';
@@ -29,6 +29,7 @@ const app = {
 	running: false, shape: 0, rotation: 0, wakeLock: null,
 	adjusting: false, handles: null, dragging: -1,
 	frames: 0, fps: 0, lastFpsAt: 0, lockedSince: 0,
+	zoom: null, zoomBusy: false, zoomWanted: null, pinch: null,
 };
 
 function fail(message) {
@@ -50,6 +51,7 @@ async function start() {
 		app.renderer ??= new WarpRenderer(els.output);
 		app.preview = new Preview(els.preview);
 		app.preview.setSourceSize(app.sampler.w, app.sampler.h);
+		app.zoom = zoomRange(app.stream);
 	} catch (err) {
 		stopCamera(app.stream);
 		app.stream = null;
@@ -133,12 +135,20 @@ function updateHint(result, now) {
 	if (app.adjusting) { els.hint.textContent = ''; return; }
 	if (result.state !== LOCKED) {
 		app.lockedSince = 0;
-		els.hint.textContent = result.candidate
-			? 'Hold still…'
-			: 'Point the camera at the screen';
+		// "Clipped" means the screen runs off the side of the view. Nothing in
+		// the frame can say where its corners are, and the fix is one the user
+		// can act on.
+		els.hint.textContent = result.clipped
+			? 'Zoom out until the whole screen is in view'
+			: result.candidate ? 'Hold still…' : 'Point the camera at the screen';
 		return;
 	}
-	if (result.coasting) { els.hint.textContent = 'Lost it for a moment…'; return; }
+	if (result.coasting) {
+		els.hint.textContent = result.blind
+			? 'No edge of the screen in view - zoom out a little'
+			: 'Lost it for a moment…';
+		return;
+	}
 	if (!app.lockedSince) app.lockedSince = now;
 	// Say so once, then get out of the way.
 	els.hint.textContent = now - app.lockedSince < 1600 ? 'Got it - move freely' : '';
@@ -157,10 +167,62 @@ function updateStats(result, now) {
 		`state      ${result.state}${result.coasting ? ' (coasting)' : ''}`,
 		`confidence ${result.confidence.toFixed(2)}`,
 		`aspect     ${aspect ? aspect.toFixed(3) : '-'} (${app.pipeline.aspectMethod ?? '-'})`,
+		`edges seen ${result.edges}/4${result.blind ? ` (blind ${result.blind})` : ''}`,
+		`zoom       ${app.zoom ? `${app.zoom.value.toFixed(1)}x of ${app.zoom.max}x` : 'not offered by this camera'}`,
 		`re-seeds   ${result.slips}`,
 		`analysis   ${app.sampler.w}x${app.sampler.h} from ${els.video.videoWidth}x${els.video.videoHeight}`,
 		`fps        ${app.fps}`,
 	].join('\n');
+}
+
+/* Pinch to zoom. */
+
+const pinchDistance = () => {
+	const [a, b] = [...app.pinch.points.values()];
+	return Math.hypot(a.x - b.x, a.y - b.y);
+};
+
+// applyConstraints is asynchronous and the camera takes a moment to settle, so
+// pinch events are collapsed: remember the latest target and apply it when the
+// previous change has landed.
+async function pushZoom() {
+	if (app.zoomBusy || app.zoomWanted === null || !app.zoom) return;
+	app.zoomBusy = true;
+	const wanted = app.zoomWanted;
+	app.zoomWanted = null;
+	try {
+		app.zoom.value = await applyZoom(app.stream, wanted) ?? wanted;
+	} catch {
+		// Some cameras advertise a range and then refuse parts of it.
+		app.zoom = zoomRange(app.stream);
+	}
+	app.zoomBusy = false;
+	if (app.zoomWanted !== null) pushZoom();
+}
+
+function onStagePointerDown(event) {
+	if (app.adjusting) return;
+	app.pinch ??= { points: new Map(), distance: 0, from: 0 };
+	app.pinch.points.set(event.pointerId, { x: event.clientX, y: event.clientY });
+	if (app.pinch.points.size === 2) {
+		app.pinch.distance = pinchDistance();
+		app.pinch.from = app.zoom ? app.zoom.value : 1;
+		if (!app.zoom) els.hint.textContent = 'This camera does not offer zoom';
+	}
+}
+
+function onStagePointerMove(event) {
+	if (!app.pinch?.points.has(event.pointerId)) return;
+	app.pinch.points.set(event.pointerId, { x: event.clientX, y: event.clientY });
+	if (app.pinch.points.size !== 2 || !app.zoom || app.pinch.distance <= 0) return;
+	const scale = pinchDistance() / app.pinch.distance;
+	const { min, max } = app.zoom;
+	app.zoomWanted = Math.min(max, Math.max(min, app.pinch.from * scale));
+	pushZoom();
+}
+
+function onStagePointerUp(event) {
+	app.pinch?.points.delete(event.pointerId);
 }
 
 /* Manual placement of the corners. */
@@ -192,7 +254,7 @@ function onPointerDown(event) {
 	});
 	if (best < 0) return;
 	app.dragging = best;
-	els.preview.setPointerCapture(event.pointerId);
+	els.preview.setPointerCapture?.(event.pointerId);
 	event.preventDefault();
 }
 
@@ -244,6 +306,10 @@ els.preview.addEventListener('pointerdown', onPointerDown);
 els.preview.addEventListener('pointermove', onPointerMove);
 els.preview.addEventListener('pointerup', onPointerUp);
 els.preview.addEventListener('pointercancel', onPointerUp);
+els.output.addEventListener('pointerdown', onStagePointerDown);
+els.output.addEventListener('pointermove', onStagePointerMove);
+els.output.addEventListener('pointerup', onStagePointerUp);
+els.output.addEventListener('pointercancel', onStagePointerUp);
 
 // Losing the GL context (backgrounded app, driver reset) leaves a canvas that
 // silently draws nothing, which would look like the tracker breaking.

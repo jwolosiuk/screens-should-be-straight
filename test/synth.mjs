@@ -130,3 +130,24 @@ export function orbitQuad(frame, { aspect = 16 / 9, focal = 700, still = false }
 		offset: [0.35 * Math.sin(t * 1.6), 0.22 * Math.sin(t * 1.15 + 1)],
 	}));
 }
+
+// Zooming in on the screen: it grows past the edges of the view while the hand
+// keeps moving. By the end all four corners are well outside the frame.
+export function zoomQuad(frame, { rate = 0.026, centre = [160, 120] } = {}) {
+	const scale = 1 + rate * frame;
+	return orbitQuad(frame / 3).map(([x, y]) => [
+		centre[0] + (x - centre[0]) * scale,
+		centre[1] + (y - centre[1]) * scale,
+	]);
+}
+
+// Paint something opaque and dark over part of the view: a head, a chair back,
+// someone walking past.
+export function occlude(gray, { x, y, w, h, value = 16 }) {
+	for (let py = Math.max(0, y | 0); py < Math.min(gray.h, y + h); py++) {
+		for (let px = Math.max(0, x | 0); px < Math.min(gray.w, x + w); px++) {
+			gray.data[py * gray.w + px] = value;
+		}
+	}
+	return gray;
+}

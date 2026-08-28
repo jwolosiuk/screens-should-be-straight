@@ -107,6 +107,7 @@ export class Acquirer {
 	// Best guess at the screen quad from the accumulated peak image, or null.
 	detect(source = this.peak) {
 		const { hist } = this;
+		this.clipped = false;
 		const peak = source;
 		const total = peak.length;
 		hist.fill(0);
@@ -130,6 +131,16 @@ export class Acquirer {
 		// makes it a screen is that it is brighter than the room around it. An
 		// evenly lit view has no such step anywhere and must yield nothing.
 		if (this.contrast(quad, peak) < this.minStep) return null;
+		// Corners sitting on the edge of the image mean the screen runs off the
+		// side of the view, and the quad is really the shape of the viewport.
+		// Nothing here can say where the true corners are, so this is reported
+		// rather than guessed at: the user can zoom out, and tracking will hold
+		// the outline afterwards even when they zoom back in.
+		const margin = 1.5;
+		if (quad.some(([x, y]) => x < margin || y < margin || x > this.w - 1 - margin || y > this.h - 1 - margin)) {
+			this.clipped = true;
+			return null;
+		}
 		return quad;
 	}
 

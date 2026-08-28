@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { LOCKED, SEARCHING, ScreenPipeline } from '../js/pipeline.js';
-import { darkPixel, orbitQuad, renderScene } from './synth.mjs';
+import { darkPixel, occlude, orbitQuad, renderScene, zoomQuad } from './synth.mjs';
 
 const W = 320, H = 240;
 const maxCornerError = (found, truth) =>
@@ -52,7 +52,7 @@ test('reports the true 16:9 shape of the screen, not its shape in the image', ()
 			/ Math.hypot(q[3][0] - q[0][0], q[3][1] - q[0][1]);
 		mostSkewed = Math.max(mostSkewed, Math.abs(naive - 16 / 9) / (16 / 9));
 	}
-	assert.ok(worstReported < 0.035, `reported aspect drifted by ${(worstReported * 100).toFixed(1)}%`);
+	assert.ok(worstReported < 0.03, `reported aspect drifted by ${(worstReported * 100).toFixed(1)}%`);
 	assert.ok(mostSkewed > 0.1, `the view was never angled enough to test anything (${mostSkewed})`);
 	assert.ok(mostSkewed > 3 * worstReported,
 		`geometry should beat the quad's own proportions by more than this: `
@@ -118,4 +118,92 @@ test('a wrong shape reading corrects itself instead of sticking', () => {
 	for (let i = 1; i <= 300; i++) pipe.update(frameAt(i));
 	assert.ok(Math.abs(pipe.aspect - 16 / 9) / (16 / 9) < 0.05,
 		`did not recover from a bad initial reading: ${pipe.aspect}`);
+});
+
+test('follows a zoom in until every corner is outside the view', () => {
+	const pipe = new ScreenPipeline(W, H);
+	// Acquire wide, the way the app asks you to, then zoom.
+	for (let i = 0; i < 25 && pipe.state !== LOCKED; i++) {
+		pipe.update(renderScene({ w: W, h: H, quad: zoomQuad(0), t: i, seed: 7 + i }));
+	}
+	assert.equal(pipe.state, LOCKED, 'never locked on before the zoom');
+
+	// Corner error is judged against the size of the screen, not in raw pixels:
+	// by the end the screen is nearly twice as wide as the whole view, so the
+	// same absolute error means something quite different than it did at the
+	// start.
+	let worst = 0, blindFrames = 0;
+	for (let i = 1; i <= 90; i++) {
+		const truth = zoomQuad(i);
+		const out = pipe.update(renderScene({ w: W, h: H, quad: truth, t: i, seed: 7 + i }));
+		assert.equal(out.state, LOCKED, `lost the screen at zoom frame ${i} (edges ${out.edges})`);
+		if (out.edges === 0) blindFrames++;
+		const width = Math.hypot(truth[1][0] - truth[0][0], truth[1][1] - truth[0][1]);
+		worst = Math.max(worst, maxCornerError(out.quad, truth) / width);
+	}
+	const finish = zoomQuad(90);
+	const outside = finish.filter(([x, y]) => x < 0 || y < 0 || x > W || y > H).length;
+	assert.equal(outside, 4, `the test should end with every corner off-frame, got ${outside}`);
+	assert.ok(worst < 0.07, `worst corner error through the zoom: ${(worst * 100).toFixed(1)}% of screen width`);
+	assert.ok(blindFrames < 20, `spent ${blindFrames} frames with no visible edge at all`);
+});
+
+test('a passing obstruction leaves the tracking alone', () => {
+	const pipe = new ScreenPipeline(W, H);
+	assert.ok(acquire(pipe) !== null);
+	let worst = 0;
+	for (let i = 1; i <= 60; i++) {
+		const truth = orbitQuad(i);
+		const gray = renderScene({ w: W, h: H, quad: truth, t: i, seed: 7 + i });
+		// Something crossing the bottom of the view: it takes out part of the
+		// bottom edge and the lower third of one side at a time. Any one edge
+		// keeps most of its length visible, which is the condition for the line
+		// fit to shrug the obstruction off as a minority of bad samples.
+		occlude(gray, { x: -40 + i * 4, y: 150, w: 50, h: H });
+		const out = pipe.update(gray);
+		assert.equal(out.state, LOCKED, `lost the screen at frame ${i}`);
+		worst = Math.max(worst, maxCornerError(out.quad, truth));
+	}
+	assert.ok(worst < 6, `worst corner error while obstructed: ${worst.toFixed(1)}px`);
+});
+
+test('an obstruction that takes the outline with it is noticed and undone', () => {
+	// The hard case, and the app does not win it outright. A tall opaque shape
+	// sweeping right across the screen hides one edge completely and offers its
+	// own boundary in place of it - dark on one side, lit picture on the other,
+	// moving smoothly. Locally there is nothing to tell the two apart, and the
+	// outline gets dragged along.
+	//
+	// What the app must do is notice. Once part of the screen is lit and
+	// outside the outline, the outline is no longer describing a screen, and
+	// the only honest move is to drop it and look again.
+	const pipe = new ScreenPipeline(W, H);
+	assert.ok(acquire(pipe) !== null);
+	let worst = 0, dropped = false, lockedAgain = 0;
+	for (let i = 1; i <= 90; i++) {
+		const truth = orbitQuad(i);
+		const gray = renderScene({ w: W, h: H, quad: truth, t: i, seed: 7 + i });
+		if (i <= 60) occlude(gray, { x: -60 + i * 5, y: 0, w: 90, h: H });
+		const out = pipe.update(gray);
+		if (out.state === SEARCHING) { dropped = true; lockedAgain = 0; }
+		else lockedAgain++;
+		if (out.quad) worst = Math.max(worst, maxCornerError(out.quad, truth));
+	}
+	assert.ok(dropped, 'followed the obstruction all the way and never questioned it');
+	assert.ok(lockedAgain > 30, 'never settled back onto the screen afterwards');
+	assert.ok(maxCornerError(pipe.quad, orbitQuad(90)) < 4, 'recovered but onto the wrong thing');
+	// The excursion before it gives up is large; what matters is that it ends.
+	assert.ok(worst < 160, `drifted ${worst.toFixed(0)}px before noticing`);
+});
+
+test('a screen larger than the view is reported as clipped, not half-locked', () => {
+	const pipe = new ScreenPipeline(W, H);
+	const huge = [[-120, -70], [430, -80], [440, 320], [-130, 310]];
+	let sawClipped = false;
+	for (let i = 0; i < 15; i++) {
+		const out = pipe.update(renderScene({ w: W, h: H, quad: huge, t: i, seed: 7 + i }));
+		assert.equal(out.state, SEARCHING, 'locked onto the shape of the viewport');
+		sawClipped ||= out.clipped;
+	}
+	assert.ok(sawClipped, 'should say the screen runs off the view, so the user can zoom out');
 });

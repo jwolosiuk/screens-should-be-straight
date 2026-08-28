@@ -33,6 +33,30 @@ export async function startCamera(video, { width = 1920, height = 1080 } = {}) {
 	return stream;
 }
 
+// Optical or sensor zoom, where the camera offers it. This is a real
+// magnification - more sensor pixels on the screen you are pointing at - which
+// is the point: a screen across a room lands on a small patch of the sensor,
+// and no amount of un-warping invents detail that was never captured. Not all
+// browsers expose it (Safari does not), so the caller has to cope with null.
+export function zoomRange(stream) {
+	const track = stream?.getVideoTracks?.()[0];
+	const zoom = track?.getCapabilities?.().zoom;
+	if (!zoom || !(zoom.max > zoom.min)) return null;
+	return {
+		min: zoom.min,
+		max: zoom.max,
+		step: zoom.step || (zoom.max - zoom.min) / 100,
+		value: track.getSettings?.().zoom ?? zoom.min,
+	};
+}
+
+export async function applyZoom(stream, value) {
+	const track = stream?.getVideoTracks?.()[0];
+	if (!track) return null;
+	await track.applyConstraints({ advanced: [{ zoom: value }] });
+	return track.getSettings?.().zoom ?? value;
+}
+
 export function stopCamera(stream) {
 	stream?.getTracks().forEach((track) => track.stop());
 }

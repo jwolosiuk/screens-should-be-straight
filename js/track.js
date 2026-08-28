@@ -11,16 +11,18 @@
 // keeps the edge glued to the bezel instead of snapping onto some high
 // contrast edge inside the movie itself, which is the failure mode that makes
 // naive edge tracking jitter.
+//
+// The outline is then solved for, not intersected. Four visible edges give
+// four lines and eight equations for the eight corner coordinates, which is
+// exactly the old intersection. But zoom in, or let a person stand in front of
+// the screen, and some of those edges are simply not there - so the equations
+// that remain are solved together with a weak pull towards where the motion so
+// far says the corners should be. Whatever the evidence pins down, it pins
+// down; whatever it leaves free comes from the prediction.
 
-import { fitLineRobust, inwardNormal, isConvex, lineIntersect, signedArea } from './geom.js';
+import { fitLineRobust, inwardNormal, isConvex, signedArea } from './geom.js';
 import { bilinear } from './image.js';
-
-const lineThrough = (p0, p1) => {
-	const dx = p1[0] - p0[0], dy = p1[1] - p0[1];
-	const len = Math.hypot(dx, dy) || 1;
-	const a = -dy / len, b = dx / len;
-	return { a, b, c: -(a * p0[0] + b * p0[1]) };
-};
+import { solveLinear } from './math.js';
 
 // Average luminance a few pixels outside a candidate border, subtracted from
 // the average a few pixels inside it. Null when too much of the window falls
@@ -82,57 +84,112 @@ export function defaultRadius(gray) {
 }
 
 /**
- * Refine `prevQuad` against the current frame.
- * Returns { quad, confidence, weakEdges } or null when the lock is lost.
+ * Fit one edge of the outline against the frame.
+ * @returns {{line:{a:number,b:number,c:number}, inliers:number, usable:number}|null}
  */
-export function trackQuad(gray, prevQuad, opts = {}) {
+export function measureEdge(gray, quad, edge, opts = {}) {
 	const samples = opts.samples ?? 20;
 	const radius = opts.radius ?? defaultRadius(gray);
 	const minContrast = opts.minContrast ?? 16;
 	const minStep = opts.minStep ?? 25;
 	const minInliers = opts.minInliers ?? 6;
-	const maxWeakEdges = opts.maxWeakEdges ?? 1;
+	const minSupport = opts.minSupport ?? 0.35;
 
+	const p0 = quad[edge], p1 = quad[(edge + 1) % 4];
+	const [nx, ny] = inwardNormal(quad, edge);
+	const points = [];
+	let usable = 0;
+	for (let j = 0; j < samples; j++) {
+		// Skip the last tenth at each end: corners are rounded and often
+		// occluded, and a bad sample there pulls the whole line.
+		const t = 0.1 + 0.8 * ((j + 0.5) / samples);
+		const px = p0[0] + (p1[0] - p0[0]) * t;
+		const py = p0[1] + (p1[1] - p0[1]) * t;
+		// An edge that runs off the side of the view is not a failed
+		// measurement, it is a shorter one: only the part in view can vote, and
+		// the threshold is a fraction of what could have voted.
+		if (bilinear(gray, px, py) < 0) continue;
+		usable++;
+		const s = findStep(gray, px, py, nx, ny, radius, minContrast, minStep);
+		if (s !== null) points.push([px + nx * s, py + ny * s]);
+	}
+	if (usable < minInliers) return null;
+	const needed = Math.max(minInliers, Math.ceil(minSupport * usable));
+	if (points.length < needed) return null;
+	const fit = fitLineRobust(points, { minInliers: needed });
+	return fit ? { line: fit.line, inliers: fit.inliers.length, usable } : null;
+}
+
+/**
+ * Corner positions that best satisfy the measured edges, pulled gently towards
+ * `prior` wherever the measurements leave a degree of freedom free.
+ *
+ * With four edges measured the line equations alone determine all eight
+ * unknowns and the prior changes the answer by a fraction of a pixel. With
+ * one or two, it is the prior that supplies the rest - which is the difference
+ * between coasting through an obstruction and losing the screen.
+ */
+export function solveCorners(lines, prior, priorWeight = 0.05) {
+	const AtA = new Float64Array(64);
+	const Atb = new Float64Array(8);
+	const addRow = (row, value) => {
+		for (let i = 0; i < 8; i++) {
+			if (row[i] === 0) continue;
+			Atb[i] += row[i] * value;
+			for (let j = 0; j < 8; j++) {
+				if (row[j] !== 0) AtA[i * 8 + j] += row[i] * row[j];
+			}
+		}
+	};
+	const row = new Float64Array(8);
+	lines.forEach((line, e) => {
+		if (!line) return;
+		// Both corners of this edge lie on the measured line: a*x + b*y + c = 0.
+		for (const corner of [e, (e + 1) % 4]) {
+			row.fill(0);
+			row[corner * 2] = line.a;
+			row[corner * 2 + 1] = line.b;
+			addRow(row, -line.c);
+		}
+	});
+	for (let corner = 0; corner < 4; corner++) {
+		for (let axis = 0; axis < 2; axis++) {
+			row.fill(0);
+			row[corner * 2 + axis] = priorWeight;
+			addRow(row, priorWeight * prior[corner][axis]);
+		}
+	}
+	const solution = solveLinear(AtA, Atb, 8);
+	if (!solution) return null;
+	return [0, 1, 2, 3].map((i) => [solution[i * 2], solution[i * 2 + 1]]);
+}
+
+/**
+ * Refine `prevQuad` against the current frame. `prevQuad` doubles as the prior,
+ * so callers should pass where they expect the outline to be, not where it was.
+ * @returns {{quad, confidence, edges, seen}|null}
+ */
+export function trackQuad(gray, prevQuad, opts = {}) {
 	const lines = [];
-	let weakEdges = 0;
-	let inlierTotal = 0;
+	let inlierTotal = 0, usableTotal = 0, seen = 0;
 	for (let e = 0; e < 4; e++) {
-		const p0 = prevQuad[e], p1 = prevQuad[(e + 1) % 4];
-		const [nx, ny] = inwardNormal(prevQuad, e);
-		const points = [];
-		for (let j = 0; j < samples; j++) {
-			// Skip the last tenth at each end: corners are rounded and often
-			// occluded, and a bad sample there pulls the whole line.
-			const t = 0.1 + 0.8 * ((j + 0.5) / samples);
-			const px = p0[0] + (p1[0] - p0[0]) * t;
-			const py = p0[1] + (p1[1] - p0[1]) * t;
-			const s = findStep(gray, px, py, nx, ny, radius, minContrast, minStep);
-			if (s !== null) points.push([px + nx * s, py + ny * s]);
-		}
-		const fit = points.length >= minInliers ? fitLineRobust(points, { minInliers }) : null;
-		if (fit) {
-			lines.push(fit.line);
-			inlierTotal += fit.inliers.length;
-		} else {
-			// Edge ran out of the frame, or is lying against something just as
-			// bright. Carry the previous edge for one or two frames rather than
-			// dropping the lock outright; more than one such edge and the
-			// outline is no longer trustworthy.
-			weakEdges++;
-			if (weakEdges > maxWeakEdges) return null;
-			lines.push(lineThrough(p0, p1));
+		const measured = measureEdge(gray, prevQuad, e, opts);
+		lines.push(measured ? measured.line : null);
+		if (measured) {
+			seen++;
+			inlierTotal += measured.inliers;
+			usableTotal += measured.usable;
 		}
 	}
-
-	const quad = [];
-	for (let i = 0; i < 4; i++) {
-		const corner = lineIntersect(lines[(i + 3) % 4], lines[i]);
-		if (!corner) return null;
-		quad.push(corner);
-	}
-	// Convex is not enough: intersecting edge lines can hand back a quad wound
-	// the other way, and every "inward" decision downstream would then point
-	// out of the screen.
+	const quad = solveCorners(lines, prevQuad, opts.priorWeight ?? 0.05);
+	if (!quad) return null;
+	// Convex is not enough: the solve can hand back a quad wound the other way,
+	// and every "inward" decision downstream would then point out of the screen.
 	if (!isConvex(quad) || signedArea(quad) <= 0) return null;
-	return { quad, confidence: inlierTotal / (samples * 4), weakEdges };
+	return {
+		quad,
+		edges: seen,
+		confidence: usableTotal ? (inlierTotal / usableTotal) * (seen / 4) : 0,
+		seen: lines.map(Boolean),
+	};
 }

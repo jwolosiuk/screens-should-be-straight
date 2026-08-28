@@ -50,24 +50,50 @@ test('does not wander onto contrast inside the picture', () => {
 	assert.ok(maxCornerError(tracked.quad, truth) < 2, `corner error ${maxCornerError(tracked.quad, truth)}`);
 });
 
-test('reports failure on a black screen rather than inventing an outline', () => {
+test('says it saw nothing on a black screen rather than inventing evidence', () => {
 	const truth = handHeldQuad(0);
 	const frame = renderScene({ w: W, h: H, quad: truth, content: darkPixel });
-	assert.equal(trackQuad(frame, truth), null);
+	const tracked = trackQuad(frame, truth);
+	// The outline it hands back is just the prior it was given; what matters is
+	// that it reports zero measured edges, so the caller knows it is coasting.
+	assert.equal(tracked.edges, 0);
+	assert.equal(tracked.confidence, 0);
+	assert.ok(maxCornerError(tracked.quad, truth) < 0.5);
 });
 
-test('carries one edge that has left the frame, gives up when two have', () => {
-	// Screen wider than the view: left and right edges are off-image.
+test('tracks on the edges it can still see when the screen overflows the view', () => {
+	// Screen wider than the view: the left and right edges are off-image
+	// entirely, and all four corners are outside the frame.
 	const wide = [[-40, 50], [360, 44], [366, 190], [-46, 182]];
 	const frame = renderScene({ w: W, h: H, quad: wide, t: 3 });
-	assert.equal(trackQuad(frame, wide), null, 'two missing edges should lose the lock');
+	const tracked = trackQuad(frame, nudge(wide, 2, 3));
+	assert.ok(tracked, 'two visible edges should be enough to keep going');
+	assert.deepEqual(tracked.seen, [true, false, true, false], 'top and bottom seen, sides not');
+	// The top and bottom edges are pinned by measurement, so the corners are
+	// right in the direction that was measured; sideways they follow the prior.
+	for (const corner of [0, 1, 2, 3]) {
+		const dy = Math.abs(tracked.quad[corner][1] - wide[corner][1]);
+		assert.ok(dy < 3.5, `corner ${corner} drifted ${dy.toFixed(1)}px across the measured edge`);
+	}
+});
 
-	const oneOut = [[-40, 50], [250, 44], [258, 186], [-46, 182]];
-	const frame2 = renderScene({ w: W, h: H, quad: oneOut, t: 3 });
-	const tracked = trackQuad(frame2, nudge(oneOut, 2, 2));
-	assert.ok(tracked, 'one missing edge should still track');
-	assert.equal(tracked.weakEdges, 1);
-	assert.ok(Math.hypot(tracked.quad[1][0] - oneOut[1][0], tracked.quad[1][1] - oneOut[1][1]) < 2);
+test('an object covering a whole edge costs that edge, not the lock', () => {
+	const truth = handHeldQuad(0);
+	const frame = renderScene({ w: W, h: H, quad: truth, t: 0 });
+	// Something large and dark in front of the bottom of the screen - a head, a
+	// chair back - covering that edge completely and part of two others.
+	for (let y = 140; y < 240; y++) {
+		for (let x = 30; x < 290; x++) frame.data[y * W + x] = 16;
+	}
+	const tracked = trackQuad(frame, nudge(truth, 2, -2));
+	assert.ok(tracked, 'lost the screen to an obstruction');
+	assert.equal(tracked.seen[2], false, 'the covered bottom edge should not be claimed as measured');
+	assert.ok(tracked.edges >= 1, 'should still have measured something');
+	// The top edge is clear, so the top corners stay put.
+	for (const corner of [0, 1]) {
+		assert.ok(Math.hypot(tracked.quad[corner][0] - truth[corner][0], tracked.quad[corner][1] - truth[corner][1]) < 3,
+			`corner ${corner} moved under the obstruction`);
+	}
 });
 
 test('a bright shot inside the picture does not out-vote the edge of the screen', () => {

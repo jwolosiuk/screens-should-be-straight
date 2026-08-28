@@ -44,6 +44,17 @@ outline creeps inward over a few seconds and ends up following whatever is
 moving on screen. Each edge is then fitted by consensus, so a hand over part of
 the bezel or a reflection along one side costs nothing.
 
+**Solve** (`js/track.js`). The outline is solved for, not intersected. Four
+visible edges give four lines and eight equations for the eight corner
+coordinates - which is just the four corners of the quadrilateral, arrived at
+the long way round. The point is what happens when there are fewer. Zoom in,
+or let someone stand in front of the screen, and some edges are not there to
+measure; the equations that remain are solved together with a weak pull towards
+where the camera's motion says the corners should be. Whatever the evidence
+pins down, it pins down; whatever it leaves free comes from the prediction. The
+corners can sit far outside the frame and still be tracked, because nothing in
+the solve requires them to be visible.
+
 **Verify** (`js/pipeline.js`). Every frame the outline is checked for
 convexity, area and sane edge lengths. A few bad frames in a row — a hand in
 front of the lens, a cut to black — are coasted through rather than dropped.
@@ -106,10 +117,12 @@ container. The tests build synthetic camera frames — a lit screen with changin
 content, seen at an angle in a dark room — so every assertion has ground truth
 to compare against: corner accuracy under 120 frames of hand-held motion, the
 recovered aspect ratio of a known 16:9 rectangle, recovery after a blackout,
-and refusal to lock onto a lamp or an empty room. `test/smoke.mjs` drives the
-real page in jsdom with a fake camera and a fake WebGL context, and checks the
-matrix that reaches the shader actually maps the output rectangle onto the
-screen.
+and refusal to lock onto a lamp or an empty room. The awkward cases have their
+own: a zoom that carries every corner out of the frame, an obstruction sweeping
+across the screen, a screen too large to fit in the view. `test/smoke.mjs`
+drives the real page in jsdom with a fake camera and a fake WebGL context, and
+checks both the matrix that reaches the shader and that a pinch asks the camera
+for the zoom it should.
 
 ## Deploying
 

@@ -65,7 +65,18 @@ const video = document.getElementById('camera');
 Object.defineProperty(video, 'videoWidth', { get: () => VIDEO_W });
 Object.defineProperty(video, 'videoHeight', { get: () => VIDEO_H });
 video.play = async () => {};
-window.navigator.mediaDevices = { getUserMedia: async () => ({ getTracks: () => [{ stop() {} }] }) };
+// A camera that offers zoom, so the pinch path has something real to drive.
+const track = {
+	stop() {},
+	settings: { zoom: 1 },
+	getCapabilities: () => ({ zoom: { min: 1, max: 5, step: 0.1 } }),
+	getSettings() { return this.settings; },
+	async applyConstraints(constraints) {
+		this.settings = { ...this.settings, ...constraints.advanced[0] };
+	},
+};
+const stream = { getTracks: () => [track], getVideoTracks: () => [track] };
+window.navigator.mediaDevices = { getUserMedia: async () => stream };
 window.isSecureContext = true;
 
 // Hand the animation loop over to the test: one frame per call, no timers.
@@ -136,6 +147,22 @@ cornersFromMatrix().forEach((p, i) => {
 	const d = Math.hypot(p[0] - moved[i][0], p[1] - moved[i][1]);
 	assert.ok(d < 6, `after moving, corner ${i} is ${d.toFixed(1)}px off`);
 });
+
+// Pinch on the output: two fingers moving apart should drive the camera's own
+// zoom, not the browser's.
+function pointer(type, id, x, y) {
+	const event = new window.Event(type, { bubbles: true });
+	Object.assign(event, { pointerId: id, clientX: x, clientY: y });
+	document.getElementById('output').dispatchEvent(event);
+}
+pointer('pointerdown', 1, 100, 100);
+pointer('pointerdown', 2, 200, 100);
+pointer('pointermove', 2, 300, 100);
+await new Promise((resolve) => setTimeout(resolve, 10));
+assert.ok(track.settings.zoom > 1.9 && track.settings.zoom < 2.1,
+	`spreading the fingers by 2x should ask the camera for 2x zoom, got ${track.settings.zoom}`);
+pointer('pointerup', 1, 100, 100);
+pointer('pointerup', 2, 300, 100);
 
 // Controls: shape, rotation, manual placement, re-scan.
 const shape = document.getElementById('btn-shape');
