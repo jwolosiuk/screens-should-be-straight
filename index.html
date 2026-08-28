@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Screens Should Be Straight</title>
+<meta name="description" content="Point your phone at a screen you can only see from an angle, and watch it straight.">
+<meta name="theme-color" content="#0d0f12">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<main id="stage" hidden>
+	<canvas id="output"></canvas>
+	<p id="hint" class="hint"></p>
+	<canvas id="preview" class="preview"></canvas>
+	<div id="adjust-bar" class="adjust-bar" hidden>
+		<span>Drag the four corners onto the screen</span>
+		<button type="button" id="adjust-apply" class="primary">Use this outline</button>
+		<button type="button" id="adjust-cancel">Cancel</button>
+	</div>
+	<nav id="controls" class="controls">
+		<button type="button" id="btn-rescan" title="Search for the screen again">Re-scan</button>
+		<button type="button" id="btn-adjust" title="Place the corners by hand">Adjust</button>
+		<button type="button" id="btn-shape" title="Shape of the output">Shape: auto</button>
+		<button type="button" id="btn-rotate" title="Rotate the picture">Rotate</button>
+		<button type="button" id="btn-fullscreen" title="Fullscreen">Fullscreen</button>
+		<button type="button" id="btn-stop" title="Stop the camera">Stop</button>
+	</nav>
+	<pre id="stats" class="stats" hidden></pre>
+</main>
+
+<section id="intro" class="intro">
+	<h1>Screens should be straight</h1>
+	<p class="lede">
+		Stuck with a bad seat? Point your phone at the screen and it will show you
+		the picture head-on, corrected live as you move.
+	</p>
+	<button type="button" id="btn-start" class="primary big">Start the camera</button>
+	<p id="error" class="error" hidden></p>
+	<ul class="notes">
+		<li>Works best when the screen is brighter than the room around it.</li>
+		<li>Hold reasonably still for a second while it finds the screen. After
+			that you can move freely - it follows.</li>
+		<li>Nothing is recorded or uploaded. The camera feed never leaves your
+			phone; there is no server behind this page.</li>
+	</ul>
+</section>
+<!-- Kept in the layout, not display:none: a hidden video element
+     stops producing frames for the GL texture on some browsers. -->
+<video id="camera" class="offscreen" playsinline muted></video>
+<script type="module" src="js/app.js"></script>
+</body>
+</html>

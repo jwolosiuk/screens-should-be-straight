@@ -1,0 +1,7 @@
+{
+  "name": "screens-should-be-straight",
+  "version": "1.0.0",
+  "description": "Live perspective correction: point a phone camera at a screen seen from an angle, watch it straight.",
+  "type": "module",
+  "private": true
+}
