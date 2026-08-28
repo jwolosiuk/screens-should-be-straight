@@ -16,6 +16,15 @@ frame, solve for the homography, and the inverse of it un-warps the picture.
 Finding those four corners, every frame, while the phone moves and the film
 underneath keeps changing, is the whole problem.
 
+**Light** (`js/image.js`). Everything downstream works on one byte per pixel,
+and what goes in that byte is not luminance. Brightness is the largest colour
+channel, plus half the chroma. Both departures come from watching a real
+outdoor screening: projected film often sits on one saturated hue for minutes,
+and saturated colour carries little luminance - a deep red picture computes
+dimmer than the plain grey of the screen it is projected onto - while grey is
+what ambient light looks like and colour is what a projector looks like. A
+black-and-white film has brightness to spare and is unaffected.
+
 **Acquire** (`js/detect.js`). With no prior guess, the screen is found as the
 bright region in a darker room. A single frame is not enough — a dark scene or
 a letterbox band would carve the region into pieces — so acquisition works on a
@@ -119,7 +128,11 @@ to compare against: corner accuracy under 120 frames of hand-held motion, the
 recovered aspect ratio of a known 16:9 rectangle, recovery after a blackout,
 and refusal to lock onto a lamp or an empty room. The awkward cases have their
 own: a zoom that carries every corner out of the frame, an obstruction sweeping
-across the screen, a screen too large to fit in the view. `test/smoke.mjs`
+across the screen, a screen too large to fit in the view. `screening.test.mjs`
+reconstructs an outdoor screening in colour from photographs of one - inflatable
+screen, unlit margins around the picture, deeply saturated content, heads of the
+front row along the bottom edge - and is the reason for several of the choices
+above. `test/smoke.mjs`
 drives the real page in jsdom with a fake camera and a fake WebGL context, and
 checks both the matrix that reaches the shader and that a pinch asks the camera
 for the zoom it should.

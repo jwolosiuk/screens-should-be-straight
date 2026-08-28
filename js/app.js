@@ -26,7 +26,7 @@ const FULL_FRAME = [[0, 0], [1, 0], [1, 1], [0, 1]];
 
 const app = {
 	stream: null, sampler: null, pipeline: null, renderer: null, preview: null,
-	running: false, shape: 0, rotation: 0, wakeLock: null,
+	running: false, shape: 0, rotation: 'auto', wakeLock: null,
 	adjusting: false, handles: null, dragging: -1,
 	frames: 0, fps: 0, lastFpsAt: 0, lockedSince: 0,
 	zoom: null, zoomBusy: false, zoomWanted: null, pinch: null,
@@ -99,9 +99,23 @@ function schedule() {
 
 const rotateQuad = (quad, k) => quad.slice(k).concat(quad.slice(0, k));
 
+// Which way up to show the picture.
+//
+// The outline's corners are labelled from the camera frame, so turning the
+// phone turns the screen within it and the un-warped picture comes out on its
+// side. A cinema screen is wider than it is tall, so a portrait-shaped result
+// means exactly that has happened; which way to turn it back is a question for
+// the device, if it will say.
+function effectiveRotation() {
+	if (app.rotation !== 'auto') return app.rotation;
+	const aspect = app.pipeline?.aspect;
+	if (!aspect || aspect >= 1) return 0;
+	return window.screen?.orientation?.angle === 270 ? 3 : 1;
+}
+
 function outputAspect() {
 	const measured = SHAPES[app.shape].ratio ?? app.pipeline.aspect ?? 16 / 9;
-	return app.rotation % 2 ? 1 / measured : measured;
+	return effectiveRotation() % 2 ? 1 / measured : measured;
 }
 
 function frame(now = performance.now()) {
@@ -112,7 +126,7 @@ function frame(now = performance.now()) {
 
 	renderer.resize(els.stage.clientWidth, els.stage.clientHeight, Math.min(window.devicePixelRatio || 1, 2));
 	if (result.state === LOCKED && result.quad) {
-		const quad = rotateQuad(sampler.toNormalized(result.quad), app.rotation);
+		const quad = rotateQuad(sampler.toNormalized(result.quad), effectiveRotation());
 		renderer.draw(els.video, quad, outputAspect());
 	} else {
 		// Nothing found yet: show the camera as it is, so the user can aim.
@@ -169,6 +183,7 @@ function updateStats(result, now) {
 		`aspect     ${aspect ? aspect.toFixed(3) : '-'} (${app.pipeline.aspectMethod ?? '-'})`,
 		`edges seen ${result.edges}/4${result.blind ? ` (blind ${result.blind})` : ''}`,
 		`zoom       ${app.zoom ? `${app.zoom.value.toFixed(1)}x of ${app.zoom.max}x` : 'not offered by this camera'}`,
+		`rotation   ${app.rotation === 'auto' ? `auto (${effectiveRotation() * 90}°)` : `${app.rotation * 90}°`}`,
 		`re-seeds   ${result.slips}`,
 		`analysis   ${app.sampler.w}x${app.sampler.h} from ${els.video.videoWidth}x${els.video.videoHeight}`,
 		`fps        ${app.fps}`,
@@ -296,7 +311,12 @@ els.shape.addEventListener('click', () => {
 	app.shape = (app.shape + 1) % SHAPES.length;
 	els.shape.textContent = `Shape: ${SHAPES[app.shape].label}`;
 });
-els.rotate.addEventListener('click', () => { app.rotation = (app.rotation + 1) % 4; });
+const ROTATIONS = ['auto', 0, 1, 2, 3];
+els.rotate.addEventListener('click', () => {
+	const next = ROTATIONS[(ROTATIONS.indexOf(app.rotation) + 1) % ROTATIONS.length];
+	app.rotation = next;
+	els.rotate.textContent = next === 'auto' ? 'Rotate: auto' : `Rotate: ${next * 90}°`;
+});
 els.fullscreen.addEventListener('click', () => {
 	if (document.fullscreenElement) document.exitFullscreen();
 	else document.documentElement.requestFullscreen?.().catch(() => {});

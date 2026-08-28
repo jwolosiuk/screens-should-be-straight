@@ -36,7 +36,8 @@ function stepAcross(gray, px, py, nx, ny, s, near, far) {
 		if (inner >= 0) { inSum += inner; inCount++; }
 	}
 	if (outCount < 3 || inCount < 3) return null;
-	return inSum / inCount - outSum / outCount;
+	const inside = inSum / inCount;
+	return { inside, step: inside - outSum / outCount };
 }
 
 // The border of the screen, somewhere along the inward normal from a sample
@@ -51,7 +52,15 @@ function stepAcross(gray, px, py, nx, ny, s, near, far) {
 // that test however sharp it is - which matters because the vertical edges in
 // a film are exactly parallel to the sides of the screen, so a whole row of
 // samples can agree on the wrong line and out-vote the right one.
-function findStep(gray, px, py, nx, ny, radius, minContrast, minStep) {
+//
+// `minInside` adds a third condition, and an outdoor screening is what it is
+// for: the projected picture sits in the middle of a larger screen, with unlit
+// margins of plain surface around it. Those margins are brighter than the night
+// behind them, so their outer boundary passes both tests above and the outline
+// settles on the screen rather than on the film. Requiring the inside of a
+// candidate to be about as bright as the picture already being tracked skips
+// past them.
+function findStep(gray, px, py, nx, ny, radius, minContrast, minStep, minInside) {
 	const n = 2 * radius + 1;
 	const grad = new Float64Array(n);
 	for (let i = 0; i < n; i++) {
@@ -65,8 +74,9 @@ function findStep(gray, px, py, nx, ny, radius, minContrast, minStep) {
 		if (i > 0 && grad[i] < grad[i - 1]) continue;
 		if (i < n - 1 && grad[i] < grad[i + 1]) continue;
 		const s = i - radius;
-		const step = stepAcross(gray, px, py, nx, ny, s, 2, 7);
-		if (step === null || step < minStep) continue;
+		const across = stepAcross(gray, px, py, nx, ny, s, 2, 7);
+		if (across === null || across.step < minStep) continue;
+		if (minInside > 0 && across.inside < minInside) continue;
 		let offset = 0;
 		if (i > 0 && i < n - 1 && isFinite(grad[i - 1]) && isFinite(grad[i + 1])) {
 			const denom = grad[i - 1] - 2 * grad[i] + grad[i + 1];
@@ -92,6 +102,7 @@ export function measureEdge(gray, quad, edge, opts = {}) {
 	const radius = opts.radius ?? defaultRadius(gray);
 	const minContrast = opts.minContrast ?? 16;
 	const minStep = opts.minStep ?? 25;
+	const minInside = opts.minInside ?? 0;
 	const minInliers = opts.minInliers ?? 6;
 	const minSupport = opts.minSupport ?? 0.35;
 
@@ -110,7 +121,7 @@ export function measureEdge(gray, quad, edge, opts = {}) {
 		// the threshold is a fraction of what could have voted.
 		if (bilinear(gray, px, py) < 0) continue;
 		usable++;
-		const s = findStep(gray, px, py, nx, ny, radius, minContrast, minStep);
+		const s = findStep(gray, px, py, nx, ny, radius, minContrast, minStep, minInside);
 		if (s !== null) points.push([px + nx * s, py + ny * s]);
 	}
 	if (usable < minInliers) return null;
@@ -118,6 +129,13 @@ export function measureEdge(gray, quad, edge, opts = {}) {
 	if (points.length < needed) return null;
 	const fit = fitLineRobust(points, { minInliers: needed });
 	return fit ? { line: fit.line, inliers: fit.inliers.length, usable } : null;
+}
+
+// Mean distance of an edge's two corners from a line.
+function distanceToLine(line, quad, edge) {
+	const a = quad[edge], b = quad[(edge + 1) % 4];
+	return (Math.abs(line.a * a[0] + line.b * a[1] + line.c)
+		+ Math.abs(line.a * b[0] + line.b * b[1] + line.c)) / 2;
 }
 
 /**
@@ -170,12 +188,23 @@ export function solveCorners(lines, prior, priorWeight = 0.05) {
  * @returns {{quad, confidence, edges, seen}|null}
  */
 export function trackQuad(gray, prevQuad, opts = {}) {
+	// Once the outline has been following the screen steadily for a while, the
+	// prediction is good to a pixel or two, and an edge that suddenly claims to
+	// be much further away than that is not the screen moving. On an outdoor
+	// screen it is usually the unlit margin around the picture, whose outer
+	// boundary is a perfectly good edge in its own right, a stone's throw
+	// outside the one being tracked. The cap is only applied once there is
+	// something worth trusting: while acquiring, or just after corners have
+	// been placed by hand, edges are expected to move a long way.
+	const maxEdgeJump = opts.maxEdgeJump ?? 0;
 	const lines = [];
 	let inlierTotal = 0, usableTotal = 0, seen = 0;
 	for (let e = 0; e < 4; e++) {
 		const measured = measureEdge(gray, prevQuad, e, opts);
-		lines.push(measured ? measured.line : null);
-		if (measured) {
+		const jumped = measured && maxEdgeJump > 0
+			&& distanceToLine(measured.line, prevQuad, e) > maxEdgeJump;
+		lines.push(measured && !jumped ? measured.line : null);
+		if (measured && !jumped) {
 			seen++;
 			inlierTotal += measured.inliers;
 			usableTotal += measured.usable;

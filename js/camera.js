@@ -1,6 +1,6 @@
 // Camera access and per-frame grayscale downsampling.
 
-import { makeGray, rgbaToGray } from './image.js';
+import { makeGray, rgbaToScreenLight } from './image.js';
 
 export const CAMERA_ERRORS = {
 	NotAllowedError: 'Camera permission was refused. Allow it in the address bar, then try again.',
@@ -61,7 +61,7 @@ export function stopCamera(stream) {
 	stream?.getTracks().forEach((track) => track.stop());
 }
 
-// Draws each frame into a small offscreen canvas and hands back one luminance
+// Draws each frame into a small offscreen canvas and hands back one brightness
 // byte per pixel. Everything downstream works at this size: a few hundred
 // pixels across is plenty to locate an edge to a fraction of a pixel, and it
 // keeps the whole analysis well inside a frame's time budget on a phone.
@@ -80,7 +80,7 @@ export class FrameSampler {
 	sample(video) {
 		this.ctx.drawImage(video, 0, 0, this.w, this.h);
 		const { data } = this.ctx.getImageData(0, 0, this.w, this.h);
-		return rgbaToGray(data, this.w, this.h, this.gray);
+		return rgbaToScreenLight(data, this.w, this.h, this.gray);
 	}
 
 	toNormalized(quad) {

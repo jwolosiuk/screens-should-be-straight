@@ -32,6 +32,9 @@ export class ScreenPipeline {
 		this.maxBlindFrames = opts.maxBlindFrames ?? 60;
 		this.minCoverage = opts.minCoverage ?? 0.02;
 		this.minInteriorLuma = opts.minInteriorLuma ?? 45;
+		this.insideFactor = opts.insideFactor ?? 0.6;
+		this.edgeJump = opts.edgeJump ?? Math.max(4, 0.028 * Math.max(w, h));
+		this.settleFrames = opts.settleFrames ?? 3;
 		this.minEdgeFrac = opts.minEdgeFrac ?? 0.06;
 		// Slow, and gated against sudden changes: the first estimate at lock is
 		// taken as-is, and after that a real screen keeps the shape it had.
@@ -65,6 +68,7 @@ export class ScreenPipeline {
 		this.velocity = null;
 		this.coast = 1;
 		this.stray = 0;
+		this.settled = 0;
 		this.aspectMethod = null;
 		this.aspectDoubt = 0;
 		this.slips = 0;
@@ -99,6 +103,7 @@ export class ScreenPipeline {
 		this.measured = quad.map((p) => [p[0], p[1]]);
 		this.velocity = null;
 		this.coast = 1;
+		this.settled = 0;
 		this.smoother.reset(quad);
 		this.quad = this.smoother.quad;
 		this.state = LOCKED;
@@ -168,23 +173,32 @@ export class ScreenPipeline {
 		return outside.filter((v) => v >= lit).length / Math.max(inCount, 12);
 	}
 
-	// Mean luminance inside the outline, over the part of it that is in view.
-	// This is what separates "zoomed in past every edge" from "the screen went
-	// black": both leave no edge to measure, but only one of them still has a
-	// lit picture in the middle, and only one of them is worth coasting on.
-	interiorLuma(gray, quad) {
+	// What the picture inside the outline looks like: its mean, and its median.
+	//
+	// The mean answers "is this still a lit screen at all", which is what tells
+	// someone zoomed in past every edge apart from a screen that has gone dark.
+	// The median answers "how bright is the picture", and is the reference the
+	// edge search uses to skip past the unlit margins of a projection screen.
+	// It has to be the median rather than the mean because film content is not
+	// uniform - one bright object in a dark shot should not raise the bar for
+	// what counts as picture.
+	interiorStats(gray, quad) {
 		const cols = 21, rows = 16;
-		let sum = 0, count = 0;
+		const values = [];
+		let sum = 0;
 		for (let r = 0; r < rows; r++) {
 			for (let c = 0; c < cols; c++) {
 				const x = Math.round(((c + 0.5) / cols) * this.w);
 				const y = Math.round(((r + 0.5) / rows) * this.h);
 				if (!insideQuad(quad, x, y)) continue;
-				sum += gray.data[y * gray.w + x];
-				count++;
+				const value = gray.data[y * gray.w + x];
+				values.push(value);
+				sum += value;
 			}
 		}
-		return count ? sum / count : 0;
+		if (!values.length) return { mean: 0, median: 0, count: 0 };
+		values.sort((a, b) => a - b);
+		return { mean: sum / values.length, median: values[values.length >> 1], count: values.length };
 	}
 
 	// The measured shape of the screen, averaged over time.
@@ -235,7 +249,14 @@ export class ScreenPipeline {
 	// Refine the outline we already have against this frame.
 	follow(gray) {
 		const { start } = this.predict();
-		const tracked = trackQuad(gray, start, this.trackOpts);
+		// How bright the picture is right now, so the edge search can tell the
+		// film from the unlit screen around it.
+		const inside = this.interiorStats(gray, this.measured ?? start);
+		const tracked = trackQuad(gray, start, {
+			...this.trackOpts,
+			minInside: inside.median * this.insideFactor,
+			maxEdgeJump: this.settled >= this.settleFrames ? this.edgeJump : 0,
+		});
 		if (!tracked || !this.plausible(tracked.quad)) return this.miss(gray);
 		this.edges = tracked.edges;
 
@@ -246,7 +267,7 @@ export class ScreenPipeline {
 			// to a halt rather than sailing off, and give that a couple of
 			// seconds. If the middle has gone dark too, the screen is off or
 			// covered, and that is a miss, not a zoom.
-			if (this.interiorLuma(gray, tracked.quad) < this.minInteriorLuma) return this.miss(gray);
+			if (this.interiorStats(gray, tracked.quad).mean < this.minInteriorLuma) return this.miss(gray);
 			this.blind++;
 			if (this.blind > this.maxBlindFrames) return this.lose(gray);
 			this.confidence = 0;
@@ -268,6 +289,7 @@ export class ScreenPipeline {
 		this.misses = 0;
 		this.blind = 0;
 		this.coast = 1;
+		this.settled = tracked.edges >= 3 ? this.settled + 1 : 0;
 		this.confidence = tracked.confidence;
 		// What was predicted, plus the correction the visible edges asked for.
 		this.velocity = this.measured ? tracked.quad.map((p, i) => [p[0] - this.measured[i][0], p[1] - this.measured[i][1]]) : null;
@@ -312,6 +334,7 @@ export class ScreenPipeline {
 			this.measured = found;
 			this.velocity = null;
 			this.coast = 1;
+			this.settled = this.settleFrames;
 
 			this.smoother.reset(found);
 			this.quad = this.smoother.quad;
@@ -331,6 +354,7 @@ export class ScreenPipeline {
 		this.velocity = null;
 		this.coast = 1;
 		this.stray = 0;
+		this.settled = 0;
 		this.candidate = null;
 		this.candidateHits = 0;
 		this.blind = 0;

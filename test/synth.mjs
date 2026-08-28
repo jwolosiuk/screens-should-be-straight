@@ -151,3 +151,92 @@ export function occlude(gray, { x, y, w, h, value = 16 }) {
 	}
 	return gray;
 }
+
+// An outdoor screening, in colour, built to match a real one: an inflatable
+// screen at night, a black frame around a grey projection surface, the
+// projected picture sitting inside that surface with unlit margins above and
+// below it, silhouettes of heads along the bottom edge, and content that is
+// deeply saturated rather than bright.
+//
+// Colour matters here in a way it does not for a television in a living room.
+// Projected film is often close to a single saturated hue - a whole reel of
+// deep red - and saturated red is *dark* by luminance: (200, 30, 90) works out
+// dimmer than the grey of an unlit screen. Anything that decides where the
+// screen is by luminance alone puts the boundary in the wrong place, or loses
+// it entirely.
+export function renderScreening({
+	w, h, picture, t = 0, surfaceMargin = 0.16, frameMargin = 0.1,
+	heads = [], palette = 'pink', seed = 11,
+}) {
+	const rgba = new Uint8ClampedArray(w * h * 4);
+	const rand = prng(seed);
+	const grow = (quad, fraction) => {
+		const cx = quad.reduce((s, p) => s + p[0], 0) / 4;
+		const cy = quad.reduce((s, p) => s + p[1], 0) / 4;
+		return quad.map(([x, y]) => [cx + (x - cx) * (1 + fraction), cy + (y - cy) * (1 + fraction)]);
+	};
+	const surface = grow(picture, surfaceMargin);
+	const frame = grow(surface, frameMargin);
+	const inv = (quad) => mat3Invert(solveHomography(UNIT_SQUARE, quad));
+	const toPicture = inv(picture), toSurface = inv(surface), toFrame = inv(frame);
+	const within = (H, x, y) => {
+		const uv = mat3Apply(H, x, y);
+		return uv && uv[0] >= 0 && uv[0] <= 1 && uv[1] >= 0 && uv[1] <= 1 ? uv : null;
+	};
+
+	// Two palettes, both taken from what a projector actually puts on a screen
+	// at night: saturated, mid-brightness, and nothing like a white rectangle.
+	const shade = (u, v) => {
+		const swirl = 0.5 + 0.5 * Math.sin(u * 5 + v * 3 + t * 0.15);
+		const blob = Math.hypot(u - 0.45, v - 0.6) < 0.3 ? 1 : 0.55;
+		return palette === 'red'
+			? [190 * blob + 40 * swirl, 12 * blob, 26 * blob + 18 * swirl]
+			: [170 * blob + 60 * swirl, 30 * blob + 20 * swirl, 90 * blob + 50 * swirl];
+	};
+
+	for (let y = 0; y < h; y++) {
+		for (let x = 0; x < w; x++) {
+			const px = x + 0.5, py = y + 0.5;
+			let colour;
+			const inPicture = within(toPicture, px, py);
+			if (inPicture) colour = shade(inPicture[0], inPicture[1]);
+			// Unlit projection surface: grey, and brighter by luminance than
+			// the saturated picture it surrounds.
+			else if (within(toSurface, px, py)) colour = [72, 72, 78];
+			// The inflatable frame, then the night sky behind it.
+			else if (within(toFrame, px, py)) colour = [10, 10, 13];
+			else colour = [13, 15, 22];
+
+			for (const head of heads) {
+				const dx = (px - head.x) / head.rx, dy = (py - head.y) / head.ry;
+				if (dx * dx + dy * dy <= 1) colour = [16, 14, 18];
+			}
+
+			const i = (y * w + x) * 4;
+			const noise = (rand() - 0.5) * 8;
+			rgba[i] = colour[0] + noise;
+			rgba[i + 1] = colour[1] + noise;
+			rgba[i + 2] = colour[2] + noise;
+			rgba[i + 3] = 255;
+		}
+	}
+	return { rgba, w, h };
+}
+
+// Heads in the front row, silhouetted along the bottom edge, sized and placed
+// from photographs of a real screening: each one blocks a small part of the
+// edge and rises only a little above it. Returns the heads and how much of the
+// edge they take out, since that fraction is what decides whether the line fit
+// can shrug them off.
+export function frontRow(quad, count = 3, radius = 13) {
+	const width = Math.hypot(quad[2][0] - quad[3][0], quad[2][1] - quad[3][1]);
+	const heads = [];
+	for (let i = 0; i < count; i++) {
+		const u = (i + 0.5) / count;
+		const x = quad[3][0] + (quad[2][0] - quad[3][0]) * u;
+		const y = quad[3][1] + (quad[2][1] - quad[3][1]) * u;
+		heads.push({ x, y: y + 14, rx: radius, ry: 22 });
+	}
+	heads.coverage = (count * 2 * radius) / width;
+	return heads;
+}

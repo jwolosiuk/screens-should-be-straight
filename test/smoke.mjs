@@ -168,7 +168,10 @@ pointer('pointerup', 2, 300, 100);
 const shape = document.getElementById('btn-shape');
 shape.click();
 assert.equal(shape.textContent, 'Shape: 16:9');
-document.getElementById('btn-rotate').click();
+const rotate = document.getElementById('btn-rotate');
+assert.equal(rotate.textContent, 'Rotate: auto');
+rotate.click();
+assert.equal(rotate.textContent, 'Rotate: 0°', 'rotation should cycle out of auto into fixed steps');
 tick();
 assert.ok(state.draws > 0);
 
