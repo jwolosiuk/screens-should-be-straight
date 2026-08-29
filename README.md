@@ -65,9 +65,16 @@ strip itself. The change candidate is the answer only where brightness has
 none: the lit room, where the wall out-shines the picture and no usable bright
 quad exists. A bright blob with the film substantially OUTSIDE it - a poster
 beside the television - is furniture. The stray-light check (has the outline
-been dragged off the screen?) demands bright AND playing outside the outline,
-runs only while the camera itself is near-still, and the "zoom out" hint needs
-sustained evidence that a playing picture leans on the view's borders.
+been dragged off the screen?) demands a COHERENT region - bright, playing,
+two-dimensional, and clear of a guard band around the outline - because
+compensation residuals glow along the screen's own border and ghost texture
+speckles single points, and a second verification round caught the check
+executing perfect locks over exactly those. Its counterpart looks inward: a
+lock whose interior stays part-picture, part-furniture over several looks is
+wrong however confidently it tracks. The film memory fades over seconds, not
+minutes, so the trail of a person walking across the frame does not veto real
+screens after they have passed - and a bright quad that stays put for a full
+second while nothing else is lockable overrides the veto outright.
 
 **Acquire** (`js/detect.js`). With no prior guess, the screen is found as the
 bright region in a darker room - or, once a film has been seen anywhere, as the

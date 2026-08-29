@@ -62,7 +62,12 @@ export class ScreenPipeline {
 		// not. Values go in with a noise floor subtracted, so sensor grain
 		// never accumulates into fake evidence.
 		this.longChange = new Float32Array(w * h);
-		this.longDecay = opts.longDecay ?? 0.999;
+		// Half-life around eight seconds: long enough that a film's region
+		// survives its quiet stretches (the film re-stamps it constantly),
+		// short enough that the trail of a person walking across the frame -
+		// which is real change, in real places, none of them a screen - fades
+		// before it distorts decisions for minutes.
+		this.longDecay = opts.longDecay ?? 0.997;
 		this.changeFloor = opts.changeFloor ?? 6;
 		// A film counts as "seen" when at least this fraction of the view has
 		// changed beyond the noise floor at some point. A fraction, not a mean:
@@ -120,11 +125,14 @@ export class ScreenPipeline {
 		this.candidate = null;
 		this.candidateHits = 0;
 		this.candidateMisses = 0;
+		this.vetoed = null;
+		this.vetoedHits = 0;
 		this.measured = null;
 		this.velocity = null;
 		this.coast = 1;
 		this.stray = 0;
 		this.settled = 0;
+		this.interiorDoubt = 0;
 		this.aspectMethod = null;
 		this.aspectDoubt = 0;
 		this.slips = 0;
@@ -230,22 +238,57 @@ export class ScreenPipeline {
 	strayLight(gray, quad) {
 		const cols = 21, rows = 16;
 		const peak = this.changeAcquirer.peak;
-		let inSum = 0, inCount = 0, strays = 0;
-		const outside = [];
+		// A guard band around the outline: motion-compensation residuals ring
+		// the screen's own high-contrast border a few pixels OUTSIDE a
+		// perfectly placed outline, and they read as bright playing picture.
+		// Executing a correct lock over its own edge glow was this check's
+		// favourite pastime.
+		const cx = quad.reduce((a, p) => a + p[0], 0) / 4;
+		const cy = quad.reduce((a, p) => a + p[1], 0) / 4;
+		const band = quad.map(([x, y]) => {
+			const dx = x - cx, dy = y - cy;
+			const len = Math.hypot(dx, dy) || 1;
+			return [x + (dx / len) * 10, y + (dy / len) * 10];
+		});
+		let inSum = 0, inCount = 0;
+		const raw = new Uint8Array(cols * rows);
 		for (let r = 0; r < rows; r++) {
 			for (let c = 0; c < cols; c++) {
 				const x = Math.round(((c + 0.5) / cols) * this.w);
 				const y = Math.round(((r + 0.5) / rows) * this.h);
 				const i = y * this.w + x;
 				if (insideQuad(quad, x, y)) { inSum += gray.data[i]; inCount++; }
-				else outside.push(i);
+				else if (!insideQuad(band, x, y)) raw[r * cols + c] = 1;
 			}
 		}
-		if (inCount < 3 || !outside.length) return 0;
+		if (inCount < 3) return 0;
 		const lit = (inSum / inCount) * this.strayBrightness;
-		for (const i of outside) {
-			if (gray.data[i] >= lit && peak[i] >= this.strayChange) strays++;
+		for (let r = 0; r < rows; r++) {
+			for (let c = 0; c < cols; c++) {
+				if (!raw[r * cols + c]) continue;
+				const x = Math.round(((c + 0.5) / cols) * this.w);
+				const y = Math.round(((r + 0.5) / rows) * this.h);
+				const i = y * this.w + x;
+				raw[r * cols + c] = gray.data[i] >= lit && peak[i] >= this.strayChange ? 2 : 1;
+			}
 		}
+		// Erosion: a stray point counts only in company. Exposed screen is a
+		// coherent two-dimensional region; ghost residuals at a door handle or
+		// a picture frame are isolated points and thin lines, and they were
+		// out-voting reality one grid cell at a time.
+		let strays = 0;
+		for (let r = 0; r < rows; r++) {
+			for (let c = 0; c < cols; c++) {
+				if (raw[r * cols + c] !== 2) continue;
+				let neighbours = 0;
+				if (r > 0 && raw[(r - 1) * cols + c] === 2) neighbours++;
+				if (r < rows - 1 && raw[(r + 1) * cols + c] === 2) neighbours++;
+				if (c > 0 && raw[r * cols + c - 1] === 2) neighbours++;
+				if (c < cols - 1 && raw[r * cols + c + 1] === 2) neighbours++;
+				if (neighbours >= 2) strays++;
+			}
+		}
+		if (strays < 4) return 0;
 		// Divided by a floor, not by inCount alone: an outline that has
 		// collapsed to a sliver contains almost nothing, and dividing by
 		// almost nothing is how a collapse ends up looking unremarkable.
@@ -347,7 +390,7 @@ export class ScreenPipeline {
 				if (gray.data[y * gray.w + x] < limit) dark++;
 			}
 		}
-		return inside === 0 || dark / inside <= 0.3;
+		return inside === 0 || dark / inside <= 0.15;
 	}
 
 	// What the picture inside the outline looks like: its mean, and its median.
@@ -433,6 +476,10 @@ export class ScreenPipeline {
 		this.cameraMotion = motion;
 		this.restless = restless;
 		if (change) this.observeChange(change);
+		// A refused frame with real motion behind it means the peak memory is
+		// full of pan smear; it takes half a second to decay below threshold
+		// on its own, and every one of those frames is a blind one. Wipe it.
+		else if (motion >= 1.5) this.changeAcquirer.reset();
 		return this.state === LOCKED ? this.follow(light) : this.search(light);
 	}
 
@@ -446,7 +493,6 @@ export class ScreenPipeline {
 			...this.trackOpts,
 			minInside: inside.median * this.insideFactor,
 			maxEdgeJump: this.edgeJump,
-			allowOutward: this.settled < this.settleFrames,
 		});
 		if (!tracked || !this.plausible(tracked.quad)) return this.miss(gray);
 		this.edges = tracked.edges;
@@ -485,6 +531,20 @@ export class ScreenPipeline {
 				if (++this.stray > this.strayFrames) return this.lose(gray);
 			} else {
 				this.stray = Math.max(0, this.stray - 1);
+			}
+		}
+
+		// A lock whose interior stays bimodal on the light channel - part
+		// picture, part furniture - is wrong, however confidently it tracks.
+		// This is what actually corrects a lock that formed on a ghost-fused
+		// blob: the stray check cannot see INSIDE the outline, and the edges
+		// of a wrong quad often sit on perfectly real contrast. Judged over
+		// several looks so one dark movie scene cannot trigger it.
+		if (this.frame % this.sanityEvery === 0) {
+			if (!this.interiorLooksLit(gray, tracked.quad)) {
+				if (++this.interiorDoubt >= 3) return this.lose(gray);
+			} else {
+				this.interiorDoubt = 0;
 			}
 		}
 
@@ -578,9 +638,30 @@ export class ScreenPipeline {
 		let clip = false;
 
 		const bright = this.acquirer.detect();
-		if (bright && this.plausible(bright) && this.trustLight(bright)) {
-			found = bright;
-			source = 'light';
+		if (bright && this.plausible(bright)) {
+			if (this.trustLight(bright)) {
+				found = bright;
+				source = 'light';
+			} else {
+				// Vetoed by film containment - but a veto is built on the change
+				// memory, and that memory can be wrong in one specific way: a
+				// passing person stamps a trail of real change across places
+				// that are not screens. A bright quad that stays put for a full
+				// second while nothing else in the frame is lockable is
+				// stronger evidence than a fading trail.
+				// A coarser match than lock probation uses: the question is
+				// whether the same REGION keeps being the only bright thing,
+				// not whether its corners are pixel-stable - film content
+				// makes a bright blob's corners flap.
+				const tol = 0.08 * Math.hypot(this.w, this.h);
+				if (this.vetoed && quadsClose(bright, this.vetoed, tol)) this.vetoedHits++;
+				else this.vetoedHits = 1;
+				this.vetoed = bright;
+				if (this.vetoedHits >= 24) {
+					found = bright;
+					source = 'light';
+				}
+			}
 		}
 		let sawCandidate = found !== null;
 		if (!found && this.changeFrame && this.filmSeen()) {
@@ -666,9 +747,12 @@ export class ScreenPipeline {
 		this.coast = 1;
 		this.stray = 0;
 		this.settled = 0;
+		this.interiorDoubt = 0;
 		this.candidate = null;
 		this.candidateHits = 0;
 		this.candidateMisses = 0;
+		this.vetoed = null;
+		this.vetoedHits = 0;
 		this.blind = 0;
 		this.edges = 0;
 		this.confidence = 0;

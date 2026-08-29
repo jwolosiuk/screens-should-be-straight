@@ -169,3 +169,86 @@ test('a still camera cannot inflate the outline through its own prediction', () 
 	assert.ok(late < early * 1.5, `outline area grew ${(late / early).toFixed(1)}x with the camera still`);
 	assert.ok(maxCornerError(pipe.quad, tablet) < 8, `ended ${maxCornerError(pipe.quad, tablet).toFixed(1)}px off`);
 });
+
+test('a lock survives 300 frames of 1px tremor without a single drop', () => {
+	// Round-two fleet finding: the stray check executed a PERFECT lock at
+	// frame 215 over its own edge-glow - compensation residuals hugging the
+	// outline - and the re-lock landed 97px deep in the keyboard.
+	const pipe = new ScreenPipeline(W, H);
+	const step = bedroomStepper(pipe);
+	let drops = 0, wasLocked = false;
+	for (let i = 0; i < 300; i++) {
+		const out = step({ t: i, seed: 21 + i, shake: 1.0 * Math.sin(i * 2.1) });
+		if (wasLocked && out.state !== LOCKED) drops++;
+		wasLocked = out.state === LOCKED;
+	}
+	assert.equal(drops, 0, `a steady lock was dropped ${drops} times under 1px tremor`);
+	assert.equal(pipe.state, LOCKED);
+	assert.ok(maxCornerError(pipe.quad, tablet) < 6, `ended ${maxCornerError(pipe.quad, tablet).toFixed(1)}px off`);
+});
+
+test('a hand-placed outline survives 300 frames of coarse tremor', () => {
+	// Round-two fleet finding: an Adjust-seeded outline died at frame 38.
+	const pipe = new ScreenPipeline(W, H);
+	const step = bedroomStepper(pipe);
+	step({ t: 0, seed: 21 });
+	assert.ok(pipe.seed(tablet.map(([x, y], k) => [x + (k % 2 ? 3 : -3), y + (k < 2 ? -3 : 3)])));
+	for (let i = 1; i <= 300; i++) {
+		const out = step({ t: i, seed: 21 + i, shake: 2.5 * Math.sin(i * 2.1) });
+		assert.equal(out.state, LOCKED, `hand-placed outline executed at frame ${i}`);
+	}
+	assert.ok(maxCornerError(pipe.quad, tablet) < 6, `drifted to ${maxCornerError(pipe.quad, tablet).toFixed(1)}px`);
+});
+
+test('a slow auto-exposure convergence neither kills the lock nor poisons the memories', () => {
+	// Round-two fleet finding: a 1.2%/frame gain ramp slid under the absolute
+	// global-change floor (dark pixels move less than any floor), fed the
+	// stray check, killed the lock at frame 50, poisoned the film memory for
+	// thousands of frames and left "zoom out" showing for five seconds.
+	const pipe = new ScreenPipeline(W, H);
+	const step = bedroomStepper(pipe);
+	for (let i = 0; i < 40; i++) step({ t: i, seed: 21 + i });
+	assert.equal(pipe.state, LOCKED);
+	for (let i = 40; i < 180; i++) {
+		const gain = i < 70 ? 1 + 0.012 * (i - 40) : 1.36;
+		const out = step({ t: i, seed: 21 + i, gain });
+		assert.equal(out.state, LOCKED, `slow AE ramp killed the lock at frame ${i}`);
+		assert.ok(!out.clipped, `"zoom out" shown during/after the ramp at frame ${i}`);
+	}
+	assert.ok(maxCornerError(pipe.quad, tablet) < 6);
+});
+
+test('a paused film plus continuing tremor keeps the lock indefinitely', () => {
+	// Round-two fleet finding: executed at frame 229 by tremor-lit wall
+	// texture, with tracking at 1.8px the whole time. A paused film in a lit
+	// room cannot be re-acquired, so that kill was permanent.
+	const pipe = new ScreenPipeline(W, H);
+	const step = bedroomStepper(pipe);
+	for (let i = 0; i < 40; i++) step({ t: i, seed: 21 + i });
+	assert.equal(pipe.state, LOCKED);
+	for (let i = 40; i < 340; i++) {
+		const out = step({ t: i, seed: 21 + i, paused: true, shake: 1.2 * Math.sin(i * 2.1) });
+		assert.equal(out.state, LOCKED, `paused film + tremor lost the lock at frame ${i}`);
+	}
+	assert.ok(maxCornerError(pipe.quad, tablet) < 6);
+});
+
+test('after a pan the lock or a clean re-lock returns within a second of steadying', () => {
+	// Round-two fleet finding: the smeared change memory took 28 frames to
+	// decay below threshold, leaving the app blind for over a second after
+	// the camera had already steadied.
+	const pipe = new ScreenPipeline(W, H);
+	const step = bedroomStepper(pipe);
+	for (let i = 0; i < 40; i++) step({ t: i, seed: 21 + i });
+	assert.equal(pipe.state, LOCKED);
+	// A 40-frame pan sweeping forty pixels out and back (peak ~3px/frame),
+	// then still with residual tremor.
+	for (let i = 40; i < 80; i++) step({ t: i, seed: 21 + i, shake: 40 * Math.sin((i - 40) * Math.PI / 40) });
+	let restored = -1;
+	for (let i = 80; i < 200 && restored < 0; i++) {
+		const out = step({ t: i, seed: 21 + i, shake: 0.5 * Math.sin(i) });
+		if (out.state === LOCKED && maxCornerError(out.quad, tablet) < 8) restored = i - 80;
+	}
+	assert.ok(restored >= 0 && restored <= 35,
+		restored < 0 ? 'never recovered after the pan' : `took ${restored} frames after steadying`);
+});

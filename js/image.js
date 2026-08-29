@@ -177,6 +177,29 @@ export class ChangeTracker {
 		this.sinceRefresh = 0;
 	}
 
+	// An exposure or gain ramp changes every pixel in PROPORTION to its
+	// brightness - which is why an absolute threshold misses slow ramps: the
+	// dark bezel moves by less than any sane floor while the bright wall
+	// sails past it, and the ramp walks straight into every memory. The
+	// signature is the ratio: change divided by brightness is large AND
+	// nearly uniform across the frame. A film's ratio is large only where the
+	// film is, and wildly non-uniform.
+	looksLikeGainRamp(plain) {
+		const ratios = [];
+		const { data, w, h } = this.change;
+		for (let y = 4; y < h; y += 8) {
+			for (let x = 4; x < w; x += 8) {
+				const i = y * w + x;
+				if (plain.data[i] > 40) ratios.push(data[i] / plain.data[i]);
+			}
+		}
+		if (ratios.length < 40) return false;
+		ratios.sort((a, b) => a - b);
+		const median = ratios[ratios.length >> 1];
+		const spread = ratios[Math.floor(ratios.length * 0.75)] - ratios[Math.floor(ratios.length * 0.25)];
+		return median >= 0.03 && spread <= Math.max(0.04, 0.8 * median);
+	}
+
 	diffAgainstReference(plain, dx, dy) {
 		const { data, w, h } = plain;
 		const out = this.change.data;
@@ -237,7 +260,7 @@ export class ChangeTracker {
 		if (refShift.saturated) this.diffAgainstReference(plain, 0, 0);
 		else this.diffAgainstReference(plain, refShift.dx, refShift.dy);
 
-		if (this.globalLevel() >= this.globalLimit) {
+		if (this.globalLevel() >= this.globalLimit || this.looksLikeGainRamp(plain)) {
 			// Exposure or white balance moved the whole frame at once.
 			this.restart(plain);
 			return { change: null, motion };

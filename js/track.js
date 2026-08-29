@@ -204,22 +204,34 @@ export function trackQuad(gray, prevQuad, opts = {}) {
 	// something worth trusting: while acquiring, or just after corners have
 	// been placed by hand, edges are expected to move a long way.
 	const maxEdgeJump = opts.maxEdgeJump ?? 0;
-	const allowOutward = opts.allowOutward ?? false;
 	const lines = [];
 	let inlierTotal = 0, usableTotal = 0, seen = 0;
 	for (let e = 0; e < 4; e++) {
 		const measured = measureEdge(gray, prevQuad, e, opts);
-		let jumped = false;
-		if (measured && maxEdgeJump > 0) {
-			const shift = signedEdgeShift(measured.line, prevQuad, e);
-			// Outward freedom is what lets a conservative change-blob lock
-			// snap out to the true edges; inward freedom is what let the top
-			// edge slide forty pixels into the film and stay there.
-			const limit = allowOutward && shift < 0 ? 4 * maxEdgeJump : maxEdgeJump;
-			jumped = Math.abs(shift) > limit;
+		let line = measured ? measured.line : null;
+		if (line && maxEdgeJump > 0) {
+			const shift = signedEdgeShift(line, prevQuad, e);
+			if (Math.abs(shift) > maxEdgeJump) {
+				// Clamp, never reject. Rejecting a far measurement leaves the
+				// edge unmeasured and the outline frozen - a conservative lock
+				// could never converge on the true edge. Clamped, the edge
+				// walks toward whatever is really measured a few pixels per
+				// frame: truth is reached in a handful of frames, while a
+				// one-frame glitch moves it almost nowhere and is walked back
+				// the next frame.
+				const step = Math.sign(shift) * maxEdgeJump;
+				const [nx, ny] = inwardNormal(prevQuad, e);
+				const p0 = prevQuad[e], p1 = prevQuad[(e + 1) % 4];
+				const a = [p0[0] + nx * step, p0[1] + ny * step];
+				const b = [p1[0] + nx * step, p1[1] + ny * step];
+				const dx = b[0] - a[0], dy = b[1] - a[1];
+				const len = Math.hypot(dx, dy) || 1;
+				const la = -dy / len, lb = dx / len;
+				line = { a: la, b: lb, c: -(la * a[0] + lb * a[1]) };
+			}
 		}
-		lines.push(measured && !jumped ? measured.line : null);
-		if (measured && !jumped) {
+		lines.push(line);
+		if (line) {
 			seen++;
 			inlierTotal += measured.inliers;
 			usableTotal += measured.usable;
