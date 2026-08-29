@@ -11,7 +11,7 @@ const els = {
 	intro: $('intro'), stage: $('stage'), video: $('camera'), output: $('output'),
 	preview: $('preview'), hint: $('hint'), statsPanel: $('stats'), error: $('error'),
 	adjustBar: $('adjust-bar'),
-	start: $('btn-start'), rescan: $('btn-rescan'), adjust: $('btn-adjust'),
+	start: $('btn-start'), rescan: $('btn-rescan'), previewToggle: $('btn-preview'), adjust: $('btn-adjust'),
 	shape: $('btn-shape'), rotate: $('btn-rotate'), fullscreen: $('btn-fullscreen'),
 	stats: $('btn-stats'), stop: $('btn-stop'), apply: $('adjust-apply'), cancel: $('adjust-cancel'),
 };
@@ -30,7 +30,31 @@ const app = {
 	adjusting: false, handles: null, dragging: -1,
 	frames: 0, fps: 0, lastFpsAt: 0, lockedSince: 0,
 	zoom: null, zoomBusy: false, zoomWanted: null, pinch: null,
+	chrome: true, tap: null, previewHidden: false, flash: null, lastAnalysis: 0,
 };
+
+// A message that survives the per-frame hint rewrite for a moment. Writing to
+// the hint directly lasts one video frame - updateHint overwrites it - so both
+// "those corners don't work" and "no zoom on this camera" were shipped
+// invisible.
+function flash(text, ms = 2500) {
+	app.flash = { text, until: performance.now() + ms };
+}
+
+// The camera thumbnail is the biggest thing sitting on top of the picture, so
+// it gets its own toggle separate from tap-to-hide-everything. While adjusting
+// it is the interaction surface and comes back regardless; the choice is
+// restored when adjusting ends.
+function applyPreviewVisibility() {
+	els.preview.hidden = app.previewHidden && !app.adjusting;
+	els.previewToggle.textContent = app.previewHidden ? 'Show preview' : 'Hide preview';
+}
+
+// Everything that is not the picture: controls, preview, hint, stats.
+function setChrome(on) {
+	app.chrome = on;
+	els.stage.classList.toggle('chrome-hidden', !on);
+}
 
 function fail(message) {
 	els.error.textContent = message;
@@ -69,6 +93,7 @@ async function start() {
 
 function stop() {
 	app.running = false;
+	setChrome(true);
 	setAdjusting(false);
 	stopCamera(app.stream);
 	app.stream = null;
@@ -85,6 +110,10 @@ function stop() {
 async function keepAwake() {
 	try {
 		app.wakeLock = await navigator.wakeLock?.request('screen');
+		// iOS releases the lock on every app switch or pull-down, and a
+		// released sentinel is still truthy - without this, the guard below
+		// never re-requests and the phone dims mid-film.
+		app.wakeLock?.addEventListener?.('release', () => { app.wakeLock = null; }, { once: true });
 	} catch { /* not fatal, and not supported everywhere */ }
 }
 document.addEventListener('visibilitychange', () => {
@@ -121,8 +150,24 @@ function outputAspect() {
 function frame(now = performance.now()) {
 	if (!app.running) return;
 	const { sampler, pipeline, renderer, preview } = app;
-	const gray = sampler.sample(els.video);
-	const result = pipeline.update(gray);
+	// Analysis is tuned in per-frame units around 30fps; a 60fps camera
+	// (requestVideoFrameCallback on many phones) would halve every window and
+	// double every decay. Cap analysis near 30Hz and keep rendering at full
+	// rate - the picture stays smooth, the arithmetic keeps its clock.
+	if (now - app.lastAnalysis < 26) {
+		renderer.resize(els.stage.clientWidth, els.stage.clientHeight, Math.min(window.devicePixelRatio || 1, 2));
+		const held = app.lastResult;
+		if (held && held.state === LOCKED && held.quad) {
+			renderer.draw(els.video, rotateQuad(sampler.toNormalized(held.quad), effectiveRotation()), outputAspect());
+		} else {
+			renderer.draw(els.video, FULL_FRAME, els.video.videoWidth / els.video.videoHeight);
+		}
+		schedule();
+		return;
+	}
+	app.lastAnalysis = now;
+	const { light, change, motion } = sampler.sample(els.video);
+	const result = pipeline.update(light, change, motion);
 
 	renderer.resize(els.stage.clientWidth, els.stage.clientHeight, Math.min(window.devicePixelRatio || 1, 2));
 	if (result.state === LOCKED && result.quad) {
@@ -133,28 +178,38 @@ function frame(now = performance.now()) {
 		renderer.draw(els.video, FULL_FRAME, els.video.videoWidth / els.video.videoHeight);
 	}
 
-	preview.render(els.video, {
-		outline: app.adjusting ? null : result.quad,
-		candidate: result.candidate,
-		handles: app.adjusting ? app.handles : null,
-		dim: app.adjusting,
-	});
+	if (!els.preview.hidden) {
+		preview.render(els.video, {
+			outline: app.adjusting ? null : result.quad,
+			candidate: result.candidate,
+			handles: app.adjusting ? app.handles : null,
+			dim: app.adjusting,
+		});
+	}
 
+	app.lastResult = result;
 	updateHint(result, now);
 	updateStats(result, now);
 	schedule();
 }
 
 function updateHint(result, now) {
+	if (app.flash) {
+		if (now < app.flash.until) { els.hint.textContent = app.flash.text; return; }
+		app.flash = null;
+	}
 	if (app.adjusting) { els.hint.textContent = ''; return; }
 	if (result.state !== LOCKED) {
 		app.lockedSince = 0;
-		// "Clipped" means the screen runs off the side of the view. Nothing in
-		// the frame can say where its corners are, and the fix is one the user
-		// can act on.
+		// "Clipped" means a playing picture demonstrably runs off the side of
+		// the view. Nothing in the frame can say where its corners are, and the
+		// fix is one the user can act on. After a while of finding nothing, say
+		// what always works instead of letting the search spin silently.
 		els.hint.textContent = result.clipped
 			? 'Zoom out until the whole screen is in view'
-			: result.candidate ? 'Hold still…' : 'Point the camera at the screen';
+			: result.searchFrames > 150
+				? 'Can\u2019t find it? Tap Adjust and drag the corners onto the screen'
+				: result.candidate ? 'Hold still\u2026' : 'Point the camera at the screen';
 		return;
 	}
 	if (result.coasting) {
@@ -165,7 +220,8 @@ function updateHint(result, now) {
 	}
 	if (!app.lockedSince) app.lockedSince = now;
 	// Say so once, then get out of the way.
-	els.hint.textContent = now - app.lockedSince < 1600 ? 'Got it - move freely' : '';
+	els.hint.textContent = now - app.lockedSince < 2400
+		? 'Got it - move freely. Tap the picture to hide the buttons' : '';
 }
 
 function updateStats(result, now) {
@@ -179,6 +235,8 @@ function updateStats(result, now) {
 	const aspect = app.pipeline.aspect;
 	els.statsPanel.textContent = [
 		`state      ${result.state}${result.coasting ? ' (coasting)' : ''}`,
+		`found via  ${result.source ?? '-'}`,
+		`restless   ${result.restless?.toFixed(1) ?? '-'}`,
 		`confidence ${result.confidence.toFixed(2)}`,
 		`aspect     ${aspect ? aspect.toFixed(3) : '-'} (${app.pipeline.aspectMethod ?? '-'})`,
 		`edges seen ${result.edges}/4${result.blind ? ` (blind ${result.blind})` : ''}`,
@@ -219,10 +277,16 @@ function onStagePointerDown(event) {
 	if (app.adjusting) return;
 	app.pinch ??= { points: new Map(), distance: 0, from: 0 };
 	app.pinch.points.set(event.pointerId, { x: event.clientX, y: event.clientY });
+	if (app.pinch.points.size === 1) {
+		app.tap = { id: event.pointerId, x: event.clientX, y: event.clientY, at: performance.now() };
+	} else {
+		// A second finger means a pinch, not a tap.
+		app.tap = null;
+	}
 	if (app.pinch.points.size === 2) {
 		app.pinch.distance = pinchDistance();
 		app.pinch.from = app.zoom ? app.zoom.value : 1;
-		if (!app.zoom) els.hint.textContent = 'This camera does not offer zoom';
+		if (!app.zoom) flash('This camera does not offer zoom to the browser - move closer instead');
 	}
 }
 
@@ -238,6 +302,13 @@ function onStagePointerMove(event) {
 
 function onStagePointerUp(event) {
 	app.pinch?.points.delete(event.pointerId);
+	// A short single-finger touch that went nowhere: toggle the panels.
+	const tap = app.tap;
+	if (tap && tap.id === event.pointerId) {
+		app.tap = null;
+		const moved = Math.hypot(event.clientX - tap.x, event.clientY - tap.y);
+		if (moved < 8 && performance.now() - tap.at < 400) setChrome(!app.chrome);
+	}
 }
 
 /* Manual placement of the corners. */
@@ -245,6 +316,7 @@ function onStagePointerUp(event) {
 function setAdjusting(on) {
 	app.adjusting = on;
 	els.preview.classList.toggle('adjusting', on);
+	applyPreviewVisibility();
 	els.adjustBar.hidden = !on;
 	els.adjust.textContent = on ? 'Adjusting…' : 'Adjust';
 	if (on) {
@@ -293,7 +365,7 @@ function onPointerUp(event) {
 function applyHandles() {
 	const quad = orderQuad(app.handles);
 	if (!isConvex(quad) || !app.pipeline.seed(quad)) {
-		els.hint.textContent = 'Those four corners do not make a screen - try again';
+		flash('Those four corners do not make a screen - try again');
 		return;
 	}
 	setAdjusting(false);
@@ -304,6 +376,10 @@ function applyHandles() {
 els.start.addEventListener('click', start);
 els.stop.addEventListener('click', stop);
 els.rescan.addEventListener('click', () => { setAdjusting(false); app.pipeline?.reset(); });
+els.previewToggle.addEventListener('click', () => {
+	app.previewHidden = !app.previewHidden;
+	applyPreviewVisibility();
+});
 els.adjust.addEventListener('click', () => setAdjusting(!app.adjusting));
 els.apply.addEventListener('click', applyHandles);
 els.cancel.addEventListener('click', () => setAdjusting(false));

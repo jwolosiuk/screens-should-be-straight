@@ -10,6 +10,12 @@
 
 * { box-sizing: border-box; }
 
+/* The hidden attribute is how the app shows and hides its panels, and any rule
+   that sets display on a class - .adjust-bar { display: flex } - silently
+   defeats it: author CSS outranks the browser's [hidden] { display: none }.
+   That is not theoretical; the adjust bar shipped permanently visible. */
+[hidden] { display: none !important; }
+
 html, body {
 	margin: 0;
 	height: 100%;
@@ -57,6 +63,13 @@ button.big { padding: 0.85rem 1.5rem; font-size: 1.05rem; width: 100%; }
 
 /* Stage */
 #stage { position: relative; flex: 1; min-height: 0; background: #000; }
+/* Tap the picture to hide everything but the picture; tap again to bring the
+   panels back. Watching a film through the phone is the whole point - the
+   buttons must not sit on top of it. */
+#stage.chrome-hidden .hint,
+#stage.chrome-hidden .preview,
+#stage.chrome-hidden .controls,
+#stage.chrome-hidden .stats { display: none; }
 /* touch-action: the pinch gesture drives the camera's own zoom, so the
    browser must not take it as a request to zoom the page. */
 #output { position: absolute; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; }
@@ -64,9 +77,12 @@ button.big { padding: 0.85rem 1.5rem; font-size: 1.05rem; width: 100%; }
 .hint {
 	position: absolute;
 	top: calc(0.75rem + env(safe-area-inset-top));
-	left: 50%;
-	transform: translateX(-50%);
-	margin: 0;
+	/* Constrained to the band left of the preview thumbnail, so the two can
+	   never cover each other on a narrow phone. */
+	left: 0.75rem;
+	right: calc(min(34vw, 210px) + 1.5rem);
+	width: fit-content;
+	margin: 0 auto;
 	padding: 0.4rem 0.9rem;
 	border-radius: 999px;
 	background: var(--panel);
@@ -74,7 +90,6 @@ button.big { padding: 0.85rem 1.5rem; font-size: 1.05rem; width: 100%; }
 	backdrop-filter: blur(8px);
 	font-size: 0.9rem;
 	text-align: center;
-	max-width: min(90vw, 26rem);
 	transition: opacity 0.25s;
 }
 .hint:empty { opacity: 0; }
@@ -118,12 +133,14 @@ button.big { padding: 0.85rem 1.5rem; font-size: 1.05rem; width: 100%; }
 	backdrop-filter: blur(8px);
 	max-width: calc(100vw - 1rem);
 }
-.controls button { font-size: 0.85rem; padding: 0.4rem 0.75rem; }
+.controls button { font-size: 0.8rem; padding: 0.35rem 0.65rem; }
 
 .adjust-bar {
 	position: absolute;
 	left: 50%;
-	bottom: calc(4.5rem + env(safe-area-inset-bottom));
+	/* At the top, under the hint - the bottom of a phone screen is where the
+	   controls wrap to two rows, and the bar's buttons drowned under them. */
+	top: calc(3.4rem + env(safe-area-inset-top));
 	transform: translateX(-50%);
 	display: flex;
 	align-items: center;
@@ -161,4 +178,15 @@ button.big { padding: 0.85rem 1.5rem; font-size: 1.05rem; width: 100%; }
 	opacity: 0.01;
 	pointer-events: none;
 	z-index: -1;
+}
+
+/* Landscape is how a phone points at a cinema screen. Centering the enlarged
+   preview there puts its top band under the adjust bar and the corner handles
+   out of reach; anchor it below the bar instead. */
+@media (orientation: landscape) {
+	.preview.adjusting {
+		top: calc(6.2rem + env(safe-area-inset-top));
+		transform: translateX(-50%);
+		max-height: calc(100vh - 7.5rem - env(safe-area-inset-top));
+	}
 }

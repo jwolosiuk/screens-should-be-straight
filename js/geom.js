@@ -202,3 +202,34 @@ export function inwardNormal(quad, i) {
 }
 
 export const quadsClose = (a, b, tol) => a.every((p, i) => dist(p, b[i]) <= tol);
+
+// The similarity (scale, rotation, translation) that best carries one point
+// set onto another, in closed form. Two points determine it exactly; more are
+// least-squares. Used to extrapolate the corners the tracker cannot see from
+// the ones it can: one camera moves everything together, so a transform
+// fitted to the pinned corners is honest evidence about the free ones.
+export function similarityBetween(from, to) {
+	const n = from.length;
+	if (n < 2) return null;
+	let fx = 0, fy = 0, tx = 0, ty = 0;
+	for (let i = 0; i < n; i++) {
+		fx += from[i][0]; fy += from[i][1];
+		tx += to[i][0]; ty += to[i][1];
+	}
+	fx /= n; fy /= n; tx /= n; ty /= n;
+	let dot = 0, cross = 0, norm = 0;
+	for (let i = 0; i < n; i++) {
+		const px = from[i][0] - fx, py = from[i][1] - fy;
+		const qx = to[i][0] - tx, qy = to[i][1] - ty;
+		dot += px * qx + py * qy;
+		cross += px * qy - py * qx;
+		norm += px * px + py * py;
+	}
+	if (norm < 1e-9) return null;
+	return { k: dot / norm, l: cross / norm, cx: fx, cy: fy, tx: tx - fx, ty: ty - fy };
+}
+
+export function applySimilarityPoint(sim, [x, y]) {
+	const dx = x - sim.cx, dy = y - sim.cy;
+	return [sim.k * dx - sim.l * dy + sim.cx + sim.tx, sim.l * dx + sim.k * dy + sim.cy + sim.ty];
+}

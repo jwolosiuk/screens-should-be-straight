@@ -1,6 +1,6 @@
 // Camera access and per-frame grayscale downsampling.
 
-import { makeGray, rgbaToScreenLight } from './image.js';
+import { ChangeTracker, makeGray, rgbaToChannels } from './image.js';
 
 export const CAMERA_ERRORS = {
 	NotAllowedError: 'Camera permission was refused. Allow it in the address bar, then try again.',
@@ -74,13 +74,24 @@ export class FrameSampler {
 		this.canvas.width = this.w;
 		this.canvas.height = this.h;
 		this.ctx = this.canvas.getContext('2d', { willReadFrequently: true });
-		this.gray = makeGray(this.w, this.h);
+		this.light = makeGray(this.w, this.h);
+		this.plain = makeGray(this.w, this.h);
+		// Change is measured against a reference from a few tenths of a second
+		// ago (a slow scene moves too little frame-to-frame to clear the sensor
+		// noise), warped by the camera's own estimated motion so hand tremor
+		// does not light up the room's static edges. ChangeTracker owns all of
+		// that, including refusing to answer on pans and exposure ramps.
+		this.tracker = new ChangeTracker(this.w, this.h);
 	}
 
+	// One light frame, the change against the compensated reference (null when
+	// it cannot be trusted this frame), and the camera's own motion in pixels.
 	sample(video) {
 		this.ctx.drawImage(video, 0, 0, this.w, this.h);
 		const { data } = this.ctx.getImageData(0, 0, this.w, this.h);
-		return rgbaToScreenLight(data, this.w, this.h, this.gray);
+		rgbaToChannels(data, this.w, this.h, this);
+		const { change, motion } = this.tracker.push(this.plain);
+		return { light: this.light, change, motion, restless: this.tracker.restlessness };
 	}
 
 	toNormalized(quad) {

@@ -7,9 +7,16 @@
 // falls back to acquisition only after several consecutive bad frames - a
 // hand passing in front of the screen or one dark cut should not cost the
 // lock.
+//
+// Two channels come in per frame. Light says where things are bright; change -
+// the difference against the previous frame - says where a film is playing.
+// In a dark cinema the two agree and light alone would do. In a lit room they
+// do not: a lamp-lit wall can outshine the picture, and every brightness-based
+// decision in here betrayed exactly that scene until change was made the
+// arbiter. A wall is bright but still; a screen is bright and moving.
 
 import { Acquirer, insideQuad } from './detect.js';
-import { dist, isConvex, quadArea, quadsClose } from './geom.js';
+import { dist, inwardNormal, isConvex, quadArea, quadsClose } from './geom.js';
 import { QuadSmoother } from './smooth.js';
 import { defaultRadius, trackQuad } from './track.js';
 import { estimateAspect, focalFromFov } from './aspect.js';
@@ -17,11 +24,52 @@ import { estimateAspect, focalFromFov } from './aspect.js';
 export const SEARCHING = 'searching';
 export const LOCKED = 'locked';
 
+const clampAbs = (v, limit) => Math.max(-limit, Math.min(limit, v));
+
+// Tiny 3x3 linear solve via Cramer's rule; null when degenerate.
+function solve3(A, b) {
+	const det = A[0][0] * (A[1][1] * A[2][2] - A[1][2] * A[2][1])
+		- A[0][1] * (A[1][0] * A[2][2] - A[1][2] * A[2][0])
+		+ A[0][2] * (A[1][0] * A[2][1] - A[1][1] * A[2][0]);
+	if (!isFinite(det) || Math.abs(det) < 1e-12) return null;
+	const sub = (col) => {
+		const M = A.map((row) => row.slice());
+		for (let r = 0; r < 3; r++) M[r][col] = b[r];
+		return M[0][0] * (M[1][1] * M[2][2] - M[1][2] * M[2][1])
+			- M[0][1] * (M[1][0] * M[2][2] - M[1][2] * M[2][0])
+			+ M[0][2] * (M[1][0] * M[2][1] - M[1][1] * M[2][0]);
+	};
+	return [sub(0) / det, sub(1) / det, sub(2) / det];
+}
+
 export class ScreenPipeline {
 	constructor(w, h, opts = {}) {
 		this.w = w;
 		this.h = h;
 		this.acquirer = new Acquirer(w, h, opts.acquire);
+		// The change channel keeps its own accumulator: a faster decay, because
+		// it answers "is a film playing there NOW", and a lower fill demand,
+		// because a film does not touch every pixel in every second.
+		// minStep is far below the light channel's: the background of a change
+		// map is near-zero, so even a quiet film clears its surroundings by
+		// twelve where a screen clears a lit room by a hundred.
+		this.changeAcquirer = new Acquirer(w, h, {
+			decay: 0.92, minFill: 0.5, minStep: 12, threshold: 12, ...opts.changeAcquire,
+		});
+		// Where a film has EVER played, decaying over minutes rather than
+		// frames. This is what lets a bright still blob be judged: a screen
+		// paused mid-film still sits where the change used to be; a wall does
+		// not. Values go in with a noise floor subtracted, so sensor grain
+		// never accumulates into fake evidence.
+		this.longChange = new Float32Array(w * h);
+		this.longDecay = opts.longDecay ?? 0.999;
+		this.changeFloor = opts.changeFloor ?? 6;
+		// A film counts as "seen" when at least this fraction of the view has
+		// changed beyond the noise floor at some point. A fraction, not a mean:
+		// a tablet across a room is a few percent of the frame, and no film on
+		// it could ever lift a whole-frame average.
+		this.minFilmFraction = opts.minFilmFraction ?? 0.02;
+		this.minFilmContainment = opts.minFilmContainment ?? 0.6;
 		this.smoother = new QuadSmoother({ snapDistance: 0.25 * Math.hypot(w, h), ...opts.smooth });
 		this.trackOpts = { radius: defaultRadius({ w, h }), ...opts.track };
 		this.stableFrames = opts.stableFrames ?? 3;
@@ -46,8 +94,15 @@ export class ScreenPipeline {
 		this.lead = opts.lead ?? 1;
 		this.coastDecay = opts.coastDecay ?? 0.75;
 		this.strayLimit = opts.strayLimit ?? 0.15;
-		this.strayBrightness = opts.strayBrightness ?? 0.75;
-		this.strayFrames = opts.strayFrames ?? 3;
+		this.strayBrightness = opts.strayBrightness ?? 0.5;
+		this.strayFrames = opts.strayFrames ?? 6;
+		this.strayChange = opts.strayChange ?? 18;
+		// The stray check runs whenever the camera is merely hand-held, not
+		// panning: motion compensation keeps the change map clean under
+		// ordinary movement, so only genuinely fast motion - where the
+		// compensation residuals at hard edges rival a playing picture - has
+		// to silence it. Theft during a real pan is caught when the pan slows.
+		this.velocityGate = opts.velocityGate ?? 2.5;
 		this.sanityEvery = opts.sanityEvery ?? 20;
 		this.sanityGrowth = opts.sanityGrowth ?? 1.35;
 		this.assumedFocal = opts.focal ?? focalFromFov(w, opts.fov ?? 65);
@@ -64,6 +119,7 @@ export class ScreenPipeline {
 		this.edges = 0;
 		this.candidate = null;
 		this.candidateHits = 0;
+		this.candidateMisses = 0;
 		this.measured = null;
 		this.velocity = null;
 		this.coast = 1;
@@ -73,7 +129,13 @@ export class ScreenPipeline {
 		this.aspectDoubt = 0;
 		this.slips = 0;
 		this.frame = 0;
+		this.searchFrames = 0;
+		this.clippedStreak = 0;
+		this.source = null;
+		this.changeFrame = null;
+		this.longChange.fill(0);
 		this.acquirer.reset();
+		this.changeAcquirer.reset();
 		this.smoother.reset();
 	}
 
@@ -104,6 +166,14 @@ export class ScreenPipeline {
 		this.velocity = null;
 		this.coast = 1;
 		this.settled = 0;
+		this.stray = 0;
+		this.blind = 0;
+		this.searchFrames = 0;
+		this.clippedStreak = 0;
+		this.candidate = null;
+		this.candidateHits = 0;
+		this.candidateMisses = 0;
+		this.source = 'seed';
 		this.smoother.reset(quad);
 		this.quad = this.smoother.quad;
 		this.state = LOCKED;
@@ -144,33 +214,140 @@ export class ScreenPipeline {
 		return this.coverage(quad) >= this.minCoverage;
 	}
 
-	// Lit picture that the outline has left out, as a fraction of the lit area
-	// it contains.
+	// Picture that the outline has left out, as a fraction of the area it
+	// contains.
 	//
 	// Individual edge checks can only ask "did this edge move oddly", and an
 	// obstruction that creeps along at a few pixels a frame never looks odd on
 	// any single frame - it just quietly takes the outline with it. This asks
 	// the question that stays answerable however slow the theft is: is there
 	// still screen out there that we have stopped calling screen?
+	//
+	// "Screen out there" demands both bright AND recently changing. Brightness
+	// alone was a disaster in a lit room - the wall outside the outline is
+	// bright everywhere, so a perfectly good hand-placed outline was executed
+	// within three frames of being seeded. The wall does not play a film.
 	strayLight(gray, quad) {
 		const cols = 21, rows = 16;
-		let inSum = 0, inCount = 0;
+		const peak = this.changeAcquirer.peak;
+		let inSum = 0, inCount = 0, strays = 0;
 		const outside = [];
 		for (let r = 0; r < rows; r++) {
 			for (let c = 0; c < cols; c++) {
 				const x = Math.round(((c + 0.5) / cols) * this.w);
 				const y = Math.round(((r + 0.5) / rows) * this.h);
-				const value = gray.data[y * gray.w + x];
-				if (insideQuad(quad, x, y)) { inSum += value; inCount++; }
-				else outside.push(value);
+				const i = y * this.w + x;
+				if (insideQuad(quad, x, y)) { inSum += gray.data[i]; inCount++; }
+				else outside.push(i);
 			}
 		}
 		if (inCount < 3 || !outside.length) return 0;
 		const lit = (inSum / inCount) * this.strayBrightness;
+		for (const i of outside) {
+			if (gray.data[i] >= lit && peak[i] >= this.strayChange) strays++;
+		}
 		// Divided by a floor, not by inCount alone: an outline that has
 		// collapsed to a sliver contains almost nothing, and dividing by
 		// almost nothing is how a collapse ends up looking unremarkable.
-		return outside.filter((v) => v >= lit).length / Math.max(inCount, 12);
+		return strays / Math.max(inCount, 12);
+	}
+
+	// Fold this frame's change into both memories. Runs in every state: the
+	// long mask has to keep filling in while locked, or the first fresh look
+	// after a lost lock would be judged against stale evidence.
+	observeChange(change) {
+		this.changeAcquirer.push(change);
+		const long = this.longChange, d = change.data, floor = this.changeFloor, decay = this.longDecay;
+		for (let i = 0; i < long.length; i++) {
+			const faded = long[i] * decay;
+			const value = d[i] - floor;
+			long[i] = value > faded ? value : faded;
+		}
+	}
+
+	// Mean of a per-pixel source over the coarse grid, inside a quad or - with
+	// null - over the whole view.
+	gridMean(source, quad = null) {
+		const cols = 21, rows = 16;
+		let sum = 0, count = 0;
+		for (let r = 0; r < rows; r++) {
+			for (let c = 0; c < cols; c++) {
+				const x = Math.round(((c + 0.5) / cols) * this.w);
+				const y = Math.round(((r + 0.5) / rows) * this.h);
+				if (quad && !insideQuad(quad, x, y)) continue;
+				sum += source[y * this.w + x];
+				count++;
+			}
+		}
+		return count ? sum / count : 0;
+	}
+
+	// Fraction of a region - a quad's interior, or with null the whole view -
+	// where a film has been seen playing.
+	changeFill(quad = null) {
+		const cols = 21, rows = 16;
+		let inside = 0, lit = 0;
+		for (let r = 0; r < rows; r++) {
+			for (let c = 0; c < cols; c++) {
+				const x = Math.round(((c + 0.5) / cols) * this.w);
+				const y = Math.round(((r + 0.5) / rows) * this.h);
+				if (quad && !insideQuad(quad, x, y)) continue;
+				inside++;
+				if (this.longChange[y * this.w + x] >= this.changeFloor) lit++;
+			}
+		}
+		return inside ? lit / inside : 0;
+	}
+
+	filmSeen() {
+		return this.changeFill() >= this.minFilmFraction;
+	}
+
+	// Whether a bright blob deserves to be believed as a screen. With no film
+	// seen anywhere - a dark cinema during a still scene, a paused video - the
+	// answer has to be yes, brightness is all there is. Once a film HAS been
+	// seen, the question is containment: a screen contains the film that plays
+	// on it, however small a corner of the picture is actually moving (a
+	// talking head, a news ticker, one subtitle strip). Only a bright blob
+	// with the film substantially OUTSIDE it - a poster beside the television -
+	// is furniture. Demanding instead that the film fill the blob rejected
+	// every mostly-static film in every dark room, which is most evenings.
+	trustLight(quad) {
+		if (!this.filmSeen()) return true;
+		const cols = 21, rows = 16;
+		let film = 0, inside = 0;
+		for (let r = 0; r < rows; r++) {
+			for (let c = 0; c < cols; c++) {
+				const x = Math.round(((c + 0.5) / cols) * this.w);
+				const y = Math.round(((r + 0.5) / rows) * this.h);
+				if (this.longChange[y * this.w + x] < this.changeFloor) continue;
+				film++;
+				if (insideQuad(quad, x, y)) inside++;
+			}
+		}
+		return film === 0 || inside / film >= this.minFilmContainment;
+	}
+
+	// A change-sourced candidate has to look like a picture on the light
+	// channel too. A blob fused with the ghost of a dark keyboard or a chair
+	// passes every shape test on the change map and then locks a third of its
+	// interior onto furniture; the light channel sees that furniture plainly.
+	interiorLooksLit(gray, quad) {
+		const stats = this.interiorStats(gray, quad);
+		if (!stats.count) return false;
+		const cols = 21, rows = 16;
+		let dark = 0, inside = 0;
+		const limit = stats.median * 0.4;
+		for (let r = 0; r < rows; r++) {
+			for (let c = 0; c < cols; c++) {
+				const x = Math.round(((c + 0.5) / cols) * this.w);
+				const y = Math.round(((r + 0.5) / rows) * this.h);
+				if (!insideQuad(quad, x, y)) continue;
+				inside++;
+				if (gray.data[y * gray.w + x] < limit) dark++;
+			}
+		}
+		return inside === 0 || dark / inside <= 0.3;
 	}
 
 	// What the picture inside the outline looks like: its mean, and its median.
@@ -240,10 +417,23 @@ export class ScreenPipeline {
 		this.aspectMethod = est.method;
 	}
 
-	/** @param {{data:Uint8ClampedArray, w:number, h:number}} gray current frame */
-	update(gray) {
+	/**
+	 * @param {{data:Uint8ClampedArray, w:number, h:number}} light current frame
+	 * @param {{data:Uint8ClampedArray, w:number, h:number}|null} change
+	 *   motion-compensated difference against a rolling reference; null on the
+	 *   first frame, on pans, on exposure ramps, and in callers that have
+	 *   nothing better - everything then falls back to light.
+	 * @param {number} motion the camera's own frame-to-frame motion in pixels,
+	 *   as measured by the ChangeTracker - NOT derived from the outline, which
+	 *   a runaway outline controls.
+	 */
+	update(light, change = null, motion = 0, restless = 0) {
 		this.frame++;
-		return this.state === LOCKED ? this.follow(gray) : this.search(gray);
+		this.changeFrame = change;
+		this.cameraMotion = motion;
+		this.restless = restless;
+		if (change) this.observeChange(change);
+		return this.state === LOCKED ? this.follow(light) : this.search(light);
 	}
 
 	// Refine the outline we already have against this frame.
@@ -255,7 +445,8 @@ export class ScreenPipeline {
 		const tracked = trackQuad(gray, start, {
 			...this.trackOpts,
 			minInside: inside.median * this.insideFactor,
-			maxEdgeJump: this.settled >= this.settleFrames ? this.edgeJump : 0,
+			maxEdgeJump: this.edgeJump,
+			allowOutward: this.settled < this.settleFrames,
 		});
 		if (!tracked || !this.plausible(tracked.quad)) return this.miss(gray);
 		this.edges = tracked.edges;
@@ -272,27 +463,85 @@ export class ScreenPipeline {
 			if (this.blind > this.maxBlindFrames) return this.lose(gray);
 			this.confidence = 0;
 			this.coast *= this.coastDecay;
+			if (this.velocity) this.velocity = this.velocity.map(([x, y]) => [x * 0.7, y * 0.7]);
 			this.measured = tracked.quad;
 			this.quad = this.smoother.update(this.measured);
 			return this.report();
 		}
 
-		// Something as bright as the screen, sitting outside the outline, for
-		// several frames together: the outline has been dragged off the screen
-		// and no amount of local refinement will bring it back. Start again.
-		if (this.strayLight(gray, tracked.quad) > this.strayLimit) {
-			if (++this.stray > this.strayFrames) return this.lose(gray);
-		} else {
-			this.stray = 0;
+		// Something bright AND playing, sitting outside the outline, for several
+		// frames together while the camera is steady: the outline has been
+		// dragged off the screen and no amount of local refinement will bring
+		// it back. Start again. Steadiness is the CAMERA's, measured by the
+		// change tracker - never the outline's own velocity, which is exactly
+		// what a runaway outline controls. Without a change frame (a pan, an
+		// exposure ramp, an old caller) there is no way to ask this safely, so
+		// it is not asked.
+		if (this.changeFrame && this.cameraMotion < this.velocityGate) {
+			// Leaky, not consecutive: hand tremor oscillates across the motion
+			// gate, and a consecutive counter reset on every gated frame could
+			// never fire while the very tremor that needs rescuing continued.
+			if (this.strayLight(gray, tracked.quad) > this.strayLimit) {
+				if (++this.stray > this.strayFrames) return this.lose(gray);
+			} else {
+				this.stray = Math.max(0, this.stray - 1);
+			}
 		}
 
 		this.misses = 0;
 		this.blind = 0;
-		this.coast = 1;
 		this.settled = tracked.edges >= 3 ? this.settled + 1 : 0;
 		this.confidence = tracked.confidence;
-		// What was predicted, plus the correction the visible edges asked for.
-		this.velocity = this.measured ? tracked.quad.map((p, i) => [p[0] - this.measured[i][0], p[1] - this.measured[i][1]]) : null;
+		// Velocity is evidence only for a corner that sits on an edge the
+		// tracker actually measured this frame; a corner on unmeasured edges
+		// follows the prediction exactly, so velocity read off it is the
+		// prediction feeding itself - left alone, that inflated a lock to
+		// three times its size with the camera sitting still. The free corners
+		// instead extrapolate through a similarity fitted to the pinned ones:
+		// one camera moves everything together, so scale and translation
+		// measured on real corners carry honestly to the rest - a zoom's
+		// outward growth is captured, a phantom dies on the pins.
+		// The motion model is built from exactly what the measured edges can
+		// testify to: their PERPENDICULAR displacement. A line pins nothing
+		// along itself, and any model that reads corner deltas swallows the
+		// unconstrained parallel component - which is the prediction feeding
+		// itself, and it flung the free corners of a lock a hundred pixels up
+		// a wall under nothing but hand tremor. Perpendicular displacements
+		// fit a translation plus a uniform scale about the centroid: two
+		// opposite edges separating is a zoom, all edges shifting together is
+		// a pan, and the direction no edge can see honestly stays put.
+		if (tracked.edges >= 1 && this.measured) {
+			this.coast = 1;
+			const c = [0, 1].map((axis) => this.measured.reduce((a, p) => a + p[axis], 0) / 4);
+			// Normal equations for (tx, ty, s), ridge-regularised.
+			const AtA = [[0.01, 0, 0], [0, 0.01, 0], [0, 0, 0.01]];
+			const Atb = [0, 0, 0];
+			for (let e = 0; e < 4; e++) {
+				if (!tracked.seen[e]) continue;
+				const [nx, ny] = inwardNormal(this.measured, e);
+				const mx = (this.measured[e][0] + this.measured[(e + 1) % 4][0]) / 2;
+				const my = (this.measured[e][1] + this.measured[(e + 1) % 4][1]) / 2;
+				const nmx = (tracked.quad[e][0] + tracked.quad[(e + 1) % 4][0]) / 2;
+				const nmy = (tracked.quad[e][1] + tracked.quad[(e + 1) % 4][1]) / 2;
+				const delta = (nmx - mx) * nx + (nmy - my) * ny;
+				const lever = (mx - c[0]) * nx + (my - c[1]) * ny;
+				const row = [nx, ny, lever];
+				for (let i = 0; i < 3; i++) {
+					Atb[i] += row[i] * delta;
+					for (let j = 0; j < 3; j++) AtA[i][j] += row[i] * row[j];
+				}
+			}
+			const solved = solve3(AtA, Atb);
+			this.velocity = solved
+				? this.measured.map((p) => [
+					clampAbs(solved[0] + solved[2] * (p[0] - c[0]), 8),
+					clampAbs(solved[1] + solved[2] * (p[1] - c[1]), 8),
+				])
+				: null;
+		} else {
+			this.coast *= this.coastDecay;
+			if (this.velocity) this.velocity = this.velocity.map(([x, y]) => [x * 0.7, y * 0.7]);
+		}
 		this.measured = tracked.quad;
 		this.checkForSlippage(gray);
 		this.quad = this.smoother.update(this.measured);
@@ -312,16 +561,69 @@ export class ScreenPipeline {
 	}
 
 	// Look for a screen with no prior guess.
+	//
+	// Brightness leads, change arbitrates. The bright blob is the screen in
+	// every dark room, including ones showing a mostly-static film whose
+	// change evidence is a face-sized patch - so a bright candidate that
+	// CONTAINS the film wins outright. The change candidate is the answer only
+	// where brightness has none: the lit room, where the wall out-shines the
+	// picture and the light acquirer returns nothing usable. Preferring change
+	// outright locked onto subtitle strips.
 	search(gray) {
+		this.searchFrames++;
 		this.acquirer.push(gray);
-		const found = this.acquirer.detect();
-		if (!found || !this.plausible(found)) {
-			this.candidate = null;
-			this.candidateHits = 0;
+
+		let found = null;
+		let source = null;
+		let clip = false;
+
+		const bright = this.acquirer.detect();
+		if (bright && this.plausible(bright) && this.trustLight(bright)) {
+			found = bright;
+			source = 'light';
+		}
+		let sawCandidate = found !== null;
+		if (!found && this.changeFrame && this.filmSeen()) {
+			const moving = this.changeAcquirer.detect();
+			if (moving && this.plausible(moving) && this.interiorLooksLit(gray, moving)) {
+				found = moving;
+				source = 'change';
+				sawCandidate = true;
+			} else {
+				clip = this.changeAcquirer.clipped || this.changeAcquirer.overflow
+					|| this.changeAcquirer.touchesBorders >= 2;
+			}
+		}
+		// A static screen larger than the view: no film to see, but a single
+		// bright blob swallowing over ninety percent of the frame is its own
+		// signature. (Content the change channel cannot map at all - a fast pan
+		// filling the view - gets no hint; it falls through to the Adjust
+		// suggestion, which is less specific but never wrong.)
+		if (!found && !this.filmSeen()) clip = clip || this.acquirer.overflow;
+
+		// Evidence for, candidates against, and silence is neutral. The clip
+		// signal is periodic by nature - loud just after a shot cut, quiet
+		// between cuts, absent on frames where content motion masquerades as a
+		// pan - so consecutive-frame debouncing could never accumulate it. A
+		// frame that produced an actual screen candidate argues the framing is
+		// fine; a frame that produced nothing at all argues nothing.
+		if (clip) this.clippedStreak = Math.min(20, this.clippedStreak + 3);
+		else if (sawCandidate) this.clippedStreak = Math.max(0, this.clippedStreak - 1);
+
+		// One good-looking frame is not enough: a passing reflection can produce
+		// a convincing quad. Require the same outline several times over - but
+		// tolerate gaps. The change channel breathes with the film (a quiet
+		// stretch between cuts thins the blob for a few frames), and resetting
+		// the count to zero on every gap would keep a perfectly stable
+		// candidate on probation forever.
+		if (!found) {
+			if (++this.candidateMisses > 4) {
+				this.candidate = null;
+				this.candidateHits = 0;
+			}
 			return this.report();
 		}
-		// One good-looking frame is not enough: a passing reflection can produce
-		// a convincing quad. Require the same outline several times over.
+		this.candidateMisses = 0;
 		const tol = 0.03 * Math.hypot(this.w, this.h);
 		if (this.candidate && quadsClose(found, this.candidate, tol)) this.candidateHits++;
 		else this.candidateHits = 1;
@@ -334,7 +636,16 @@ export class ScreenPipeline {
 			this.measured = found;
 			this.velocity = null;
 			this.coast = 1;
-			this.settled = this.settleFrames;
+				// A lock from the light channel is exact - the blob IS the lit
+			// picture - so its edges are immediately held to small moves, which
+			// is what keeps them off a projection screen's unlit margins. A
+			// lock from the change channel is conservative: quiet parts of the
+			// film leave the blob ragged, and the tracker needs a moment of
+			// freedom to snap outward onto the true edges.
+			this.settled = source === 'change' ? 0 : this.settleFrames;
+			this.source = source;
+			this.searchFrames = 0;
+			this.clippedStreak = 0;
 
 			this.smoother.reset(found);
 			this.quad = this.smoother.quad;
@@ -357,11 +668,13 @@ export class ScreenPipeline {
 		this.settled = 0;
 		this.candidate = null;
 		this.candidateHits = 0;
+		this.candidateMisses = 0;
 		this.blind = 0;
 		this.edges = 0;
 		this.confidence = 0;
 
 		this.acquirer.reset();
+		this.changeAcquirer.reset();
 		this.smoother.reset();
 		return gray ? this.search(gray) : this.report();
 	}
@@ -378,6 +691,11 @@ export class ScreenPipeline {
 		if (this.measured.some(([x, y]) => x < 0 || y < 0 || x > this.w - 1 || y > this.h - 1)) return;
 		const fresh = this.acquirer.detectSingle(gray);
 		if (!fresh || !this.plausible(fresh)) return;
+		// The fresh look is a brightness look, and in a lit room the brightest
+		// coherent blob is the room. Adopting it would hand a perfectly good
+		// outline to the wall, so it faces the same question as any bright
+		// blob: is the film in it?
+		if (!this.trustLight(fresh)) return;
 		if (quadArea(fresh) > this.sanityGrowth * quadArea(this.measured)) {
 			this.measured = fresh;
 
@@ -394,9 +712,15 @@ export class ScreenPipeline {
 			confidence: this.confidence,
 			aspect: this.aspect,
 			slips: this.slips,
+			restless: this.restless,
 			edges: this.edges,
 			blind: this.blind,
-			clipped: this.state === SEARCHING && this.acquirer.clipped === true,
+			// Only the change channel earns this message: it means a playing
+			// picture demonstrably runs off the side of the view. The light
+			// channel used to say it about a bedroom wall.
+			clipped: this.state === SEARCHING && this.clippedStreak >= 12,
+			source: this.source,
+			searchFrames: this.searchFrames,
 			coasting: this.state === LOCKED && (this.misses > 0 || this.blind > 0),
 		};
 	}

@@ -25,8 +25,53 @@ dimmer than the plain grey of the screen it is projected onto - while grey is
 what ambient light looks like and colour is what a projector looks like. A
 black-and-white film has brightness to spare and is unaffected.
 
+**Change** (`js/image.js` ChangeTracker, `js/pipeline.js`). The second channel,
+and in a lit room the decisive one: the difference between the current frame
+and a reference from a few tenths of a second ago, WARPED by the camera's own
+estimated motion. The warp is not an optimisation - without it, ordinary hand
+tremor lights up ghosts of every static edge in the room, and the film drowns
+in them: the first version of this channel never locked at all in the very
+scene it was built for unless the phone was propped against something. Motion
+is estimated twice per frame by capped-loss block matching (the cap stops a
+panning film or a passing person from dragging the estimate): once against the
+previous frame, which is the camera's true motion, and once against the
+reference, which is the warp. A saturated estimate with a HIGH residual is a
+shot cut, not a pan - the camera did not move, and cuts are a film's loudest
+evidence. Frames the comparison cannot be trusted on - real pans, exposure and
+white-balance ramps (the whole frame's quietest decile moving at once) - are
+dropped rather than folded into any memory.
+
+A slow film moves by only a few grey levels per frame - beneath the sensor
+noise - but against the half-second reference it accumulates, and noise does
+not. Change is measured on the bare largest channel rather than the boosted
+one, because the boost pushes a bright picture against the top of the byte and
+differences taken up there come back crushed. Two memories build on it: a fast
+decaying peak ("is a film playing there now") and a slow one lasting minutes
+("where has a film ever played"), with the noise floor subtracted so grain
+never accumulates into fake evidence.
+
+A lamp-lit bedroom is why this exists. The wall under warm light outshines a
+tablet's picture in every brightness measure, and the first version of this app
+- built and tested against dark rooms - found the wall, told the user to "zoom
+out until the whole screen is in view", and executed any hand-placed outline
+within three frames because the wall outside it looked like stray screen light.
+A wall is bright but still; a screen is bright and moving.
+
+Brightness leads, change arbitrates. The bright blob is the screen in every
+dark room - including one showing a mostly-static film whose only change is a
+talking head or a subtitle strip - so a bright candidate that CONTAINS the film
+wins outright; preferring change outright turned out to lock onto the subtitle
+strip itself. The change candidate is the answer only where brightness has
+none: the lit room, where the wall out-shines the picture and no usable bright
+quad exists. A bright blob with the film substantially OUTSIDE it - a poster
+beside the television - is furniture. The stray-light check (has the outline
+been dragged off the screen?) demands bright AND playing outside the outline,
+runs only while the camera itself is near-still, and the "zoom out" hint needs
+sustained evidence that a playing picture leans on the view's borders.
+
 **Acquire** (`js/detect.js`). With no prior guess, the screen is found as the
-bright region in a darker room. A single frame is not enough — a dark scene or
+bright region in a darker room - or, once a film has been seen anywhere, as the
+region where it plays. A single frame is not enough — a dark scene or
 a letterbox band would carve the region into pieces — so acquisition works on a
 slowly decaying per-pixel *maximum* over roughly the last second. Anything that
 lit up recently still counts as screen. The largest bright blob is hulled,
@@ -52,6 +97,17 @@ agree on the wrong line and out-vote the right one; without that test the
 outline creeps inward over a few seconds and ends up following whatever is
 moving on screen. Each edge is then fitted by consensus, so a hand over part of
 the bezel or a reflection along one side costs nothing.
+
+**Predict** (`js/pipeline.js`). Between frames, the outline moves by a motion
+model built from exactly what the measured edges can testify to: their
+perpendicular displacement, fitted to a translation plus a uniform scale about
+the centroid. A line pins nothing along itself, and any model that reads
+corner deltas swallows the unconstrained parallel component - the prediction
+feeding itself. That subtlety was found the hard way twice: per-corner
+velocity inflated a resting lock to three times its size, and a similarity
+fitted through two collinear corners flung the free edge a hundred pixels up a
+wall under nothing but hand tremor. Two opposite edges separating is a zoom,
+measured; the direction no edge can see honestly stays put.
 
 **Solve** (`js/track.js`). The outline is solved for, not intersected. Four
 visible edges give four lines and eight equations for the eight corner
@@ -131,8 +187,9 @@ own: a zoom that carries every corner out of the frame, an obstruction sweeping
 across the screen, a screen too large to fit in the view. `screening.test.mjs`
 reconstructs an outdoor screening in colour from photographs of one - inflatable
 screen, unlit margins around the picture, deeply saturated content, heads of the
-front row along the bottom edge - and is the reason for several of the choices
-above. `test/smoke.mjs`
+front row along the bottom edge - and `litroom.test.mjs` does the same for a
+lamp-lit bedroom with a tablet, from a photograph of the app failing in it.
+Both are the reason for several of the choices above. `test/smoke.mjs`
 drives the real page in jsdom with a fake camera and a fake WebGL context, and
 checks both the matrix that reaches the shader and that a pinch asks the camera
 for the zoom it should.

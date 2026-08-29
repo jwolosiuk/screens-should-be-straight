@@ -131,11 +131,18 @@ export function measureEdge(gray, quad, edge, opts = {}) {
 	return fit ? { line: fit.line, inliers: fit.inliers.length, usable } : null;
 }
 
-// Mean distance of an edge's two corners from a line.
-function distanceToLine(line, quad, edge) {
+// How far a measured line sits from the prior edge, signed: positive means
+// the line lies INWARD of where the edge was, negative outward. Inward and
+// outward jumps are not symmetric crimes - an outward jump grows the outline
+// toward containing more picture, an inward one eats into it.
+function signedEdgeShift(line, quad, edge) {
+	const [nx, ny] = inwardNormal(quad, edge);
+	const along = line.a * nx + line.b * ny;
+	if (Math.abs(along) < 1e-6) return 0;
 	const a = quad[edge], b = quad[(edge + 1) % 4];
-	return (Math.abs(line.a * a[0] + line.b * a[1] + line.c)
-		+ Math.abs(line.a * b[0] + line.b * b[1] + line.c)) / 2;
+	const da = line.a * a[0] + line.b * a[1] + line.c;
+	const db = line.a * b[0] + line.b * b[1] + line.c;
+	return -((da + db) / 2) / along;
 }
 
 /**
@@ -197,12 +204,20 @@ export function trackQuad(gray, prevQuad, opts = {}) {
 	// something worth trusting: while acquiring, or just after corners have
 	// been placed by hand, edges are expected to move a long way.
 	const maxEdgeJump = opts.maxEdgeJump ?? 0;
+	const allowOutward = opts.allowOutward ?? false;
 	const lines = [];
 	let inlierTotal = 0, usableTotal = 0, seen = 0;
 	for (let e = 0; e < 4; e++) {
 		const measured = measureEdge(gray, prevQuad, e, opts);
-		const jumped = measured && maxEdgeJump > 0
-			&& distanceToLine(measured.line, prevQuad, e) > maxEdgeJump;
+		let jumped = false;
+		if (measured && maxEdgeJump > 0) {
+			const shift = signedEdgeShift(measured.line, prevQuad, e);
+			// Outward freedom is what lets a conservative change-blob lock
+			// snap out to the true edges; inward freedom is what let the top
+			// edge slide forty pixels into the film and stay there.
+			const limit = allowOutward && shift < 0 ? 4 * maxEdgeJump : maxEdgeJump;
+			jumped = Math.abs(shift) > limit;
+		}
 		lines.push(measured && !jumped ? measured.line : null);
 		if (measured && !jumped) {
 			seen++;

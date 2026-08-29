@@ -16,7 +16,7 @@ docker run --rm -v "$PWD:/app:ro" -w /app node:22-alpine node --test test/*.test
 
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
-cp -r index.html js test "$work/"
+cp -r index.html styles.css js test "$work/"
 echo '{"type":"module"}' > "$work/package.json"
 
 echo "== app in jsdom =="

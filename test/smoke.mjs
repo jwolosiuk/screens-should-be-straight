@@ -8,6 +8,13 @@
 
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
+
+// The adjust bar once shipped permanently visible: .adjust-bar { display:flex }
+// outranks the browser's [hidden] { display:none }. The stylesheet must carry
+// its own guard, and jsdom does not apply CSS, so the file itself is checked.
+const css = readFileSync(new URL('../styles.css', import.meta.url), 'utf8');
+assert.match(css, /\[hidden\][^}]*display:\s*none\s*!important/,
+	'styles.css must keep the [hidden] { display: none !important } guard');
 import { JSDOM } from 'jsdom';
 import { mat3Apply } from '../js/math.js';
 import { UNIT_SQUARE } from '../js/math.js';
@@ -95,11 +102,16 @@ const setFrame = (quad, t, still = false) => {
 	state.gray = renderScene({ w: 320, h: 240, quad, t, seed: 7 + t });
 	return quad;
 };
+// A clock that advances ~one video frame per tick: the app caps analysis at
+// ~38Hz by wall time, and synchronous ticks sharing a timestamp would all take
+// the render-only path, never re-running the pipeline or the hints.
+let mockNow = performance.now();
 const tick = () => {
 	assert.ok(pending, 'the app stopped asking for frames');
 	const cb = pending;
 	pending = null;
-	cb(performance.now());
+	mockNow += 33;
+	cb(mockNow);
 };
 
 // Start: the click has to come from a user gesture in a real browser, which is
@@ -163,6 +175,35 @@ assert.ok(track.settings.zoom > 1.9 && track.settings.zoom < 2.1,
 	`spreading the fingers by 2x should ask the camera for 2x zoom, got ${track.settings.zoom}`);
 pointer('pointerup', 1, 100, 100);
 pointer('pointerup', 2, 300, 100);
+
+// A short single tap on the picture hides every panel; another brings them
+// back; a pinch is not a tap.
+const stage = document.getElementById('stage');
+pointer('pointerdown', 5, 150, 150);
+pointer('pointerup', 5, 151, 150);
+assert.ok(stage.classList.contains('chrome-hidden'), 'a tap should hide the controls');
+pointer('pointerdown', 6, 150, 150);
+pointer('pointerup', 6, 150, 151);
+assert.ok(!stage.classList.contains('chrome-hidden'), 'a second tap should bring them back');
+pointer('pointerdown', 7, 100, 100);
+pointer('pointerdown', 8, 200, 100);
+pointer('pointerup', 7, 100, 100);
+pointer('pointerup', 8, 200, 100);
+assert.ok(!stage.classList.contains('chrome-hidden'), 'a pinch must not toggle the controls');
+
+// The camera thumbnail has its own toggle, and adjusting overrides it: the
+// preview is the surface the corner handles live on.
+const previewEl = document.getElementById('preview');
+const previewBtn = document.getElementById('btn-preview');
+previewBtn.click();
+assert.ok(previewEl.hidden, 'Hide preview should hide the thumbnail');
+assert.equal(previewBtn.textContent, 'Show preview');
+document.getElementById('btn-adjust').click();
+assert.ok(!previewEl.hidden, 'adjusting must bring the preview back');
+document.getElementById('adjust-cancel').click();
+assert.ok(previewEl.hidden, 'the choice returns when adjusting ends');
+previewBtn.click();
+assert.ok(!previewEl.hidden, 'Show preview should bring it back');
 
 // Controls: shape, rotation, manual placement, re-scan.
 const shape = document.getElementById('btn-shape');

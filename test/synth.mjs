@@ -4,6 +4,23 @@
 
 import { mat3Apply, mat3Invert, solveHomography, UNIT_SQUARE } from '../js/math.js';
 import { orderQuad } from '../js/geom.js';
+import { ChangeTracker } from '../js/image.js';
+
+// Mirrors FrameSampler exactly: {light, plain} channels in, {light, change,
+// motion} out, via the same motion-compensated ChangeTracker the app uses.
+// Tests that feed frames any other way are testing an app that does not exist.
+export class ChangeFeed {
+	constructor(opts = {}) {
+		this.opts = opts;
+		this.tracker = null;
+	}
+
+	push({ light, plain }) {
+		this.tracker ??= new ChangeTracker(plain.w, plain.h, this.opts);
+		const { change, motion } = this.tracker.push(plain);
+		return { light, change, motion, restless: this.tracker.restlessness };
+	}
+}
 
 export function prng(seed = 1) {
 	let s = seed >>> 0;
@@ -239,4 +256,77 @@ export function frontRow(quad, count = 3, radius = 13) {
 	}
 	heads.coverage = (count * 2 * radius) / width;
 	return heads;
+}
+
+// A lit bedroom with a tablet playing a film - built from a photograph of the
+// app failing in exactly this scene. Nothing here is dark: the walls are warm
+// and bright under lamp light, the bedding is white, and under the
+// max-plus-chroma measure the wall can outshine the picture. What separates
+// the screen from the room is not brightness at all - it is that the picture
+// CHANGES from frame to frame and the room does not.
+export function renderBedroom({
+	w, h, picture, t = 0, seed = 21, shake = 0, paused = false, gain = 1,
+}) {
+	const rgba = new Uint8ClampedArray(w * h * 4);
+	const rand = prng(seed);
+	const time = paused ? 0 : t;
+	const grow = (quad, fraction) => {
+		const cx = quad.reduce((s, p) => s + p[0], 0) / 4;
+		const cy = quad.reduce((s, p) => s + p[1], 0) / 4;
+		return quad.map(([x, y]) => [cx + (x - cx) * (1 + fraction), cy + (y - cy) * (1 + fraction)]);
+	};
+	const bezel = grow(picture, 0.08);
+	// A keyboard in front of the tablet, as on a laptop or a folio case.
+	const keyboard = [
+		[bezel[3][0] - 8, bezel[3][1]], [bezel[2][0] + 30, bezel[2][1]],
+		[bezel[2][0] + 44, bezel[2][1] + h * 0.16], [bezel[3][0] - 20, bezel[3][1] + h * 0.18],
+	];
+	const inv = (quad) => mat3Invert(solveHomography(UNIT_SQUARE, quad));
+	const toPicture = inv(picture), toBezel = inv(bezel), toKeyboard = inv(keyboard);
+	const within = (H, x, y) => {
+		const uv = mat3Apply(H, x, y);
+		return uv && uv[0] >= 0 && uv[0] <= 1 && uv[1] >= 0 && uv[1] <= 1 ? uv : null;
+	};
+	// Cool blue-white film, exposed the way a phone camera would expose it:
+	// bright but not clipped. Continuous motion, and a shot cut every ~1.2
+	// seconds - the rhythm that makes real film light up a change map.
+	const shot = Math.floor(time / 36);
+	const film = (u, v) => {
+		const swirl = 22 * Math.sin(u * 7 + shot * 2 + time * 0.25) + 14 * Math.sin(v * 9 - time * 0.18);
+		const blob = Math.hypot(u - (0.35 + 0.3 * Math.sin(shot + time * 0.3)), v - 0.45) < 0.22 ? 35 : 0;
+		const sub = v > 0.86 && v < 0.95 && Math.abs(u - 0.5) < 0.3 ? 45 : 0;
+		const cut = (shot % 3) * 18;
+		return [128 + swirl + blob + sub + cut, 146 + swirl + blob + sub + cut, 196 + swirl * 0.8 + blob + sub + cut];
+	};
+	for (let y = 0; y < h; y++) {
+		for (let x = 0; x < w; x++) {
+			const px = x + 0.5 + shake, py = y + 0.5 + shake * 0.6;
+			let colour;
+			const inPicture = within(toPicture, px, py);
+			if (inPicture) colour = film(inPicture[0], inPicture[1]);
+			else if (within(toBezel, px, py)) colour = [24, 24, 28];
+			else if (within(toKeyboard, px, py)) colour = [58 + ((x >> 3) + (y >> 3)) % 2 * 10, 56, 54];
+			else if (py > h * 0.55 + (px - w / 2) * 0.1) {
+				// White bedding with soft folds.
+				const fold = 12 * Math.sin(px * 0.05 + py * 0.11);
+				colour = [222 + fold, 218 + fold, 210 + fold];
+			} else {
+				// Warm lamp-lit wall: bright, and high-chroma. Under the
+				// max-plus-half-chroma measure this rivals the picture itself.
+				const glow = 18 * (1 - py / h);
+				colour = [212 + glow, 178 + glow * 0.8, 138 + glow * 0.5];
+				// A door handle and a picture frame: dark texture that turns
+				// into a web of thin change-lines when the camera shakes.
+				if (px > w * 0.62 && px < w * 0.66 && py > h * 0.28 && py < h * 0.34) colour = [70, 60, 50];
+				if (px > w * 0.85 && px < w * 0.95 && py > h * 0.05 && py < h * 0.2) colour = [120, 100, 80];
+			}
+			const i = (y * w + x) * 4;
+			const noise = (rand() - 0.5) * 7;
+			rgba[i] = colour[0] + noise;
+			rgba[i + 1] = colour[1] + noise;
+			rgba[i + 2] = colour[2] + noise;
+			rgba[i + 3] = 255;
+		}
+	}
+	return { rgba, w, h };
 }

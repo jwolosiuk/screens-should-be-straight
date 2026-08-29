@@ -47,6 +47,14 @@ export class Acquirer {
 		this.minFill = opts.minFill ?? 0.7;
 		this.minHullFit = opts.minHullFit ?? 0.85;
 		this.minStep = opts.minStep ?? 22;
+		// With no fixed threshold, Otsu picks one from the histogram - right
+		// for the light channel, whose illumination is unknowable in advance.
+		// The change channel is pre-normalised (zero means static), and Otsu
+		// there splits BETWEEN the film's own change and the brighter
+		// compensation residuals that ring the screen's high-contrast edges,
+		// keeping the ring slivers and discarding the film. A fixed threshold
+		// keeps both: the ring hugs the true boundary, so it helps.
+		this.threshold = opts.threshold ?? null;
 		this.peak = new Float32Array(w * h);
 		this.labels = new Int32Array(w * h);
 		this.stack = new Int32Array(w * h);
@@ -108,14 +116,42 @@ export class Acquirer {
 	detect(source = this.peak) {
 		const { hist } = this;
 		this.clipped = false;
+		this.overflow = false;
+		this.touchesBorders = 0;
 		const peak = source;
 		const total = peak.length;
-		hist.fill(0);
-		for (let i = 0; i < total; i++) hist[Math.min(255, peak[i] | 0)]++;
-		const threshold = otsuThreshold(hist, total);
+		let threshold = this.threshold;
+		if (threshold === null) {
+			hist.fill(0);
+			for (let i = 0; i < total; i++) hist[Math.min(255, peak[i] | 0)]++;
+			threshold = otsuThreshold(hist, total);
+		}
 		const blob = this.largestComponent(threshold, peak);
 		if (!blob) return null;
-		if (blob.size < total * this.minAreaFrac || blob.size > total * this.maxAreaFrac) return null;
+		// How many of the view's four borders the blob reaches. The quad-corner
+		// check below jitters when the blob breathes (a quiet strip of film
+		// near the frame edge drops out for a few frames); the bounding box
+		// does not, and a blob leaning on two or more borders is the steady
+		// signature of a screen that does not fit in the view.
+		{
+			const margin = 1.5;
+			let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+			for (const [x, y] of blob.points) {
+				if (x < minX) minX = x;
+				if (x > maxX) maxX = x;
+				if (y < minY) minY = y;
+				if (y > maxY) maxY = y;
+			}
+			this.touchesBorders = (minX <= margin) + (maxX >= this.w - 1 - margin)
+				+ (minY <= margin) + (maxY >= this.h - 1 - margin);
+		}
+		if (blob.size < total * this.minAreaFrac) return null;
+		// Too big is not the same as absent: on the change channel, a blob
+		// filling the whole view means the screen runs off every side of it.
+		if (blob.size > total * this.maxAreaFrac) {
+			this.overflow = true;
+			return null;
+		}
 		const hull = convexHull(blob.points);
 		if (hull.length < 4) return null;
 		const quad = maxAreaQuad(simplifyPolygon(hull, 2, 4));
@@ -135,8 +171,10 @@ export class Acquirer {
 		// side of the view, and the quad is really the shape of the viewport.
 		// Nothing here can say where the true corners are, so this is reported
 		// rather than guessed at: the user can zoom out, and tracking will hold
-		// the outline afterwards even when they zoom back in.
-		const margin = 1.5;
+		// the outline afterwards even when they zoom back in. The margin is
+		// wider than the hull simplification's own rounding, which pulls a
+		// border-hugging corner a couple of pixels inward.
+		const margin = 3.5;
 		if (quad.some(([x, y]) => x < margin || y < margin || x > this.w - 1 - margin || y > this.h - 1 - margin)) {
 			this.clipped = true;
 			return null;
@@ -162,7 +200,11 @@ export class Acquirer {
 				else { outSum += v; outCount++; }
 			}
 		}
-		if (inCount < 32 || outCount < 32) return Infinity;
+		// Too little on either side to compare is a failure to show contrast,
+		// not a pass: a blob covering nearly the whole view used to sail
+		// through here on Infinity and then flag itself as a clipped screen -
+		// in a lamp-lit bedroom, that blob was the wall.
+		if (inCount < 32 || outCount < 32) return 0;
 		return inSum / inCount - outSum / outCount;
 	}
 }
