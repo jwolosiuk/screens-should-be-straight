@@ -16,8 +16,7 @@ function bedroomStepper(pipe) {
 	const feed = new ChangeFeed();
 	return (opts) => {
 		const scene = renderBedroom({ w: W, h: H, picture: tablet, ...opts });
-		const { light, change, motion, restless, warp } = feed.push(rgbaToChannels(scene.rgba, W, H));
-		return pipe.update(light, change, motion, restless, warp);
+		return pipe.update(feed.push(rgbaToChannels(scene.rgba, W, H)));
 	};
 }
 
@@ -123,8 +122,7 @@ test('a mostly-static film in a dark room still locks fast via brightness', () =
 	let locked = -1;
 	for (let i = 0; i < 40 && locked < 0; i++) {
 		const g = renderScene({ w: W, h: H, quad, t: i, seed: 7 + i, content: face });
-		const { light, change, motion, restless, warp } = feed.push({ light: g, plain: g });
-		if (pipe.update(light, change, motion, restless, warp).state === LOCKED) locked = i;
+		if (pipe.update(feed.push({ light: g, plain: g })).state === LOCKED) locked = i;
 	}
 	assert.ok(locked >= 0 && locked <= 12, `took ${locked} frames - the light path was vetoed`);
 	assert.ok(maxCornerError(pipe.quad, quad) < 4, `locked onto ${maxCornerError(pipe.quad, quad).toFixed(1)}px off - the talking head?`);
@@ -141,8 +139,7 @@ test('a flipping subtitle strip at startup does not become the screen', () => {
 	let locked = -1;
 	for (let i = 0; i < 40 && locked < 0; i++) {
 		const g = renderScene({ w: W, h: H, quad, t: i, seed: 7 + i, content: subtitled });
-		const { light, change, motion, restless, warp } = feed.push({ light: g, plain: g });
-		if (pipe.update(light, change, motion, restless, warp).state === LOCKED) locked = i;
+		if (pipe.update(feed.push({ light: g, plain: g })).state === LOCKED) locked = i;
 	}
 	assert.ok(locked >= 0, 'never locked');
 	assert.ok(maxCornerError(pipe.quad, quad) < 4,

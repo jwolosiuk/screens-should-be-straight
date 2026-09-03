@@ -4,6 +4,10 @@ import { LOCKED, SEARCHING, ScreenPipeline } from '../js/pipeline.js';
 import { ChangeFeed, darkPixel, occlude, orbitQuad, renderScene, zoomQuad } from './synth.mjs';
 
 const W = 320, H = 240;
+// Scenes that predate the change channel hand the pipeline a light frame
+// and nothing else, which is exactly what a caller with no better evidence
+// does: everything falls back to brightness.
+const asFrame = (light) => ({ light });
 const maxCornerError = (found, truth) =>
 	Math.max(...found.map((p, i) => Math.hypot(p[0] - truth[i][0], p[1] - truth[i][1])));
 const frameAt = (i, opts = {}) =>
@@ -14,15 +18,14 @@ const frameAt = (i, opts = {}) =>
 function feeder(pipe) {
 	const feed = new ChangeFeed();
 	return (gray) => {
-		const { light, change, motion, restless, warp } = feed.push({ light: gray, plain: gray });
-		return pipe.update(light, change, motion, restless, warp);
+		return pipe.update(feed.push({ light: gray, plain: gray }));
 	};
 }
 
 // Hold the camera roughly still until the pipeline reports a lock.
 function acquire(pipe, { limit = 25, still = true, from = 0 } = {}) {
 	for (let i = 0; i < limit; i++) {
-		const out = pipe.update(frameAt(from + i, { still }));
+		const out = pipe.update(asFrame(frameAt(from + i, { still })));
 		if (out.state === LOCKED) return i + 1;
 	}
 	return null;
@@ -37,7 +40,7 @@ test('locks onto a screen held in view, then follows the camera for 150 frames',
 
 	let worst = 0;
 	for (let i = 1; i <= 150; i++) {
-		const out = pipe.update(frameAt(i));
+		const out = pipe.update(asFrame(frameAt(i)));
 		assert.equal(out.state, LOCKED, `dropped the lock at frame ${i}`);
 		worst = Math.max(worst, maxCornerError(out.quad, orbitQuad(i)));
 	}
@@ -52,7 +55,7 @@ test('reports the true 16:9 shape of the screen, not its shape in the image', ()
 	// tracking is perfect, and averaging those in used to stretch the picture.
 	let worstReported = 0, mostSkewed = 0;
 	for (let i = 1; i <= 300; i++) {
-		const out = pipe.update(frameAt(i));
+		const out = pipe.update(asFrame(frameAt(i)));
 		assert.ok(pipe.aspect, `no aspect estimate at frame ${i}`);
 		worstReported = Math.max(worstReported, Math.abs(pipe.aspect - 16 / 9) / (16 / 9));
 		// What the quad's own proportions would suggest, which is the answer
@@ -76,12 +79,12 @@ test('coasts through a brief blackout, gives up on a long one, then re-acquires'
 
 	// A cut to black for three frames: keep the lock, flag it as coasting.
 	for (let i = 0; i < 3; i++) {
-		const out = pipe.update(renderScene({ w: W, h: H, quad, content: darkPixel }));
+		const out = pipe.update(asFrame(renderScene({ w: W, h: H, quad, content: darkPixel })));
 		assert.equal(out.state, LOCKED);
 		assert.ok(out.coasting);
 	}
 	// Back to picture: the outline is still right where it was.
-	const back = pipe.update(renderScene({ w: W, h: H, quad, t: 4 }));
+	const back = pipe.update(asFrame(renderScene({ w: W, h: H, quad, t: 4 })));
 	assert.equal(back.state, LOCKED);
 	assert.ok(!back.coasting);
 	assert.ok(maxCornerError(back.quad, quad) < 4);
@@ -89,7 +92,7 @@ test('coasts through a brief blackout, gives up on a long one, then re-acquires'
 	// Now cover the screen for a long stretch - the lock should be dropped.
 	let dropped = false;
 	for (let i = 0; i < 12 && !dropped; i++) {
-		dropped = pipe.update(renderScene({ w: W, h: H, quad, content: darkPixel })).state === SEARCHING;
+		dropped = pipe.update(asFrame(renderScene({ w: W, h: H, quad, content: darkPixel }))).state === SEARCHING;
 	}
 	assert.ok(dropped, 'kept claiming a lock on a screen it could not see');
 
@@ -103,7 +106,7 @@ test('a hand-placed outline goes straight to tracking', () => {
 	const rough = truth.map(([x, y], i) => [x + (i % 2 ? 5 : -5), y + (i < 2 ? -4 : 4)]);
 	assert.ok(pipe.seed(rough));
 	assert.equal(pipe.state, LOCKED);
-	for (let i = 0; i < 12; i++) pipe.update(frameAt(i, { still: true }));
+	for (let i = 0; i < 12; i++) pipe.update(asFrame(frameAt(i, { still: true })));
 	assert.ok(maxCornerError(pipe.quad, truth) < 3, `corner error ${maxCornerError(pipe.quad, truth)}`);
 	assert.equal(pipe.seed([[0, 0], [10, 0], [0, 10], [10, 10]]), false, 'self-crossing outline accepted');
 });
@@ -112,7 +115,7 @@ test('an empty room never claims a lock', () => {
 	const pipe = new ScreenPipeline(W, H);
 	const quad = [[0, 0], [W, 0], [W, H], [0, H]];
 	for (let i = 0; i < 20; i++) {
-		const out = pipe.update(renderScene({ w: W, h: H, quad, content: darkPixel, room: 22, seed: i }));
+		const out = pipe.update(asFrame(renderScene({ w: W, h: H, quad, content: darkPixel, room: 22, seed: i })));
 		assert.equal(out.state, SEARCHING);
 	}
 });
@@ -125,7 +128,7 @@ test('a wrong shape reading corrects itself instead of sticking', () => {
 	// outlier, which is exactly the situation where rejecting outliers would
 	// leave the picture permanently stretched.
 	pipe.aspect = 3.1;
-	for (let i = 1; i <= 300; i++) pipe.update(frameAt(i));
+	for (let i = 1; i <= 300; i++) pipe.update(asFrame(frameAt(i)));
 	assert.ok(Math.abs(pipe.aspect - 16 / 9) / (16 / 9) < 0.05,
 		`did not recover from a bad initial reading: ${pipe.aspect}`);
 });
@@ -142,13 +145,13 @@ test('a centred zoom tracks tightly for as long as any edge is visible', () => {
 	};
 	const pipe = new ScreenPipeline(W, H);
 	for (let i = 0; i < 25 && pipe.state !== LOCKED; i++) {
-		pipe.update(renderScene({ w: W, h: H, quad: centred(0), t: i, seed: 7 + i }));
+		pipe.update(asFrame(renderScene({ w: W, h: H, quad: centred(0), t: i, seed: 7 + i })));
 	}
 	assert.equal(pipe.state, LOCKED, 'never locked before the zoom');
 	let worst = 0;
 	for (let i = 1; i <= 20; i++) {
 		const truth = centred(i);
-		const out = pipe.update(renderScene({ w: W, h: H, quad: truth, t: i, seed: 7 + i }));
+		const out = pipe.update(asFrame(renderScene({ w: W, h: H, quad: truth, t: i, seed: 7 + i })));
 		assert.equal(out.state, LOCKED, `lost the screen at zoom frame ${i}`);
 		const width = Math.hypot(truth[1][0] - truth[0][0], truth[1][1] - truth[0][1]);
 		worst = Math.max(worst, maxCornerError(out.quad, truth) / width);
@@ -166,13 +169,13 @@ test('an off-centre zoom degrades bounded and heals when edges return', () => {
 	// zoom reverses and edges return, the outline snaps back.
 	const pipe = new ScreenPipeline(W, H);
 	for (let i = 0; i < 25 && pipe.state !== LOCKED; i++) {
-		pipe.update(renderScene({ w: W, h: H, quad: zoomQuad(0), t: i, seed: 7 + i }));
+		pipe.update(asFrame(renderScene({ w: W, h: H, quad: zoomQuad(0), t: i, seed: 7 + i })));
 	}
 	assert.equal(pipe.state, LOCKED);
 	let worst = 0;
 	for (let i = 1; i <= 90; i++) {
 		const truth = zoomQuad(i);
-		const out = pipe.update(renderScene({ w: W, h: H, quad: truth, t: i, seed: 7 + i }));
+		const out = pipe.update(asFrame(renderScene({ w: W, h: H, quad: truth, t: i, seed: 7 + i })));
 		assert.equal(out.state, LOCKED, `lost the screen at zoom frame ${i}`);
 		const width = Math.hypot(truth[1][0] - truth[0][0], truth[1][1] - truth[0][1]);
 		worst = Math.max(worst, maxCornerError(out.quad, truth) / width);
@@ -181,7 +184,7 @@ test('an off-centre zoom degrades bounded and heals when edges return', () => {
 	// Zoom back out; the lagging edges come back into view and re-pin.
 	for (let i = 91; i <= 180; i++) {
 		const truth = zoomQuad(180 - i);
-		pipe.update(renderScene({ w: W, h: H, quad: truth, t: i, seed: 7 + i }));
+		pipe.update(asFrame(renderScene({ w: W, h: H, quad: truth, t: i, seed: 7 + i })));
 	}
 	const truth = zoomQuad(0);
 	assert.equal(pipe.state, LOCKED, 'lost the lock on the way back out');
@@ -202,7 +205,7 @@ test('a passing obstruction leaves the tracking alone', () => {
 		// keeps most of its length visible, which is the condition for the line
 		// fit to shrug the obstruction off as a minority of bad samples.
 		occlude(gray, { x: -40 + i * 4, y: 150, w: 50, h: H });
-		const out = pipe.update(gray);
+		const out = pipe.update(asFrame(gray));
 		assert.equal(out.state, LOCKED, `lost the screen at frame ${i}`);
 		worst = Math.max(worst, maxCornerError(out.quad, truth));
 	}

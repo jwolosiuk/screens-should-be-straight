@@ -19,8 +19,7 @@ function stepper(pipe, opts = {}) {
 	const feed = new ChangeFeed();
 	return (extra) => {
 		const scene = renderDaylightRoom({ w: W, h: H, picture: television, ...opts, ...extra });
-		const { light, change, motion, restless, warp } = feed.push(rgbaToChannels(scene.rgba, W, H));
-		return pipe.update(light, change, motion, restless, warp);
+		return pipe.update(feed.push(rgbaToChannels(scene.rgba, W, H)));
 	};
 }
 

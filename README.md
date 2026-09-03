@@ -31,6 +31,26 @@ dimmer than the plain grey of the screen it is projected onto - while grey is
 what ambient light looks like and colour is what a projector looks like. A
 black-and-white film has brightness to spare and is unaffected.
 
+**The gyroscope** (`js/motion-sensor.js`). Every pixel channel here can be
+argued with by a film large enough to fill the view: asked "how did the picture
+move", a block-matcher answers honestly about the wrong thing. The phone's own
+gyroscope cannot be fooled by anything on a screen, and it supplies the one
+statement none of the pixel channels can make - *the device did not move, so
+the room did not move, so whatever changed in that moment changed by itself*.
+Change seen during those still moments is collected separately, and once there
+is enough of it, that is the map acquisition uses: residue at a hard edge only
+exists while the camera moves, so a map built from stillness is about things
+that move on their own, which is the definition of a screen and the opposite of
+a wall.
+
+Rotation is what matters at arm's length - a tenth of a degree of wrist
+rotation shifts the image about half a pixel, while any plausible translation
+shifts it by nothing measurable - so the reading is `focal x rotation`, with
+acceleration used only as a second vote on stillness. Permission is requested
+from inside the tap on **Start**, because iOS only allows the prompt while the
+gesture is alive; refusal costs nothing, and everything below works exactly as
+it did before, on pixels alone.
+
 **Change** (`js/image.js` ChangeTracker, `js/pipeline.js`). The second channel,
 and in a lit room the decisive one: the difference between the current frame
 and a reference from a few tenths of a second ago, WARPED by the camera's own
@@ -181,8 +201,9 @@ full-resolution video.
   portrait.
 - **Re-scan** — forget the current outline and search again.
 - **Stats** shows what the tracker is doing: state, confidence, the measured
-  aspect ratio and how it was arrived at, how often the outline had to be
-  re-seeded, and the frame rate.
+  aspect ratio and how it was arrived at, which channel found the screen, how
+  often the outline had to be re-seeded, whether a gyroscope is reporting, and
+  the frame rate.
 
 Known limits: the screen has to be brighter than its surroundings, which is the
 assumption acquisition is built on. If more than one edge of the screen leaves

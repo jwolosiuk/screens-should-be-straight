@@ -1,6 +1,7 @@
 // Wiring: camera in, pipeline in the middle, warped picture out.
 
 import { applyZoom, startCamera, stopCamera, zoomRange, CAMERA_ERRORS, FrameSampler } from './camera.js';
+import { MotionSensor } from './motion-sensor.js';
 import { isConvex, orderQuad } from './geom.js';
 import { LOCKED, ScreenPipeline } from './pipeline.js';
 import { Preview } from './preview.js';
@@ -29,7 +30,7 @@ const app = {
 	running: false, shape: 0, rotation: 'auto', wakeLock: null,
 	adjusting: false, handles: null, dragging: -1,
 	frames: 0, fps: 0, lastFpsAt: 0, lockedSince: 0,
-	zoom: null, zoomBusy: false, zoomWanted: null, pinch: null,
+	zoom: null, zoomBusy: false, zoomWanted: null, pinch: null, sensor: null,
 	chrome: true, tap: null, previewHidden: false, flash: null, lastAnalysis: 0,
 };
 
@@ -65,6 +66,9 @@ async function start() {
 	els.error.hidden = true;
 	els.start.disabled = true;
 	els.start.textContent = 'Starting…';
+	// Before any await: iOS only allows the motion prompt while the tap that
+	// triggered it is still live. Refusal costs nothing but the extra help.
+	const motionAllowed = await MotionSensor.request();
 	try {
 		app.stream = await startCamera(els.video);
 		app.sampler = new FrameSampler(els.video.videoWidth, els.video.videoHeight);
@@ -76,6 +80,11 @@ async function start() {
 		app.preview = new Preview(els.preview);
 		app.preview.setSourceSize(app.sampler.w, app.sampler.h);
 		app.zoom = zoomRange(app.stream);
+		if (motionAllowed) {
+			app.sensor = new MotionSensor();
+			if (app.sensor.start()) app.sampler.useSensor(app.sensor);
+			else app.sensor = null;
+		}
 	} catch (err) {
 		stopCamera(app.stream);
 		app.stream = null;
@@ -97,6 +106,8 @@ function stop() {
 	setAdjusting(false);
 	stopCamera(app.stream);
 	app.stream = null;
+	app.sensor?.stop();
+	app.sensor = null;
 	app.wakeLock?.release?.().catch(() => {});
 	app.wakeLock = null;
 	els.stage.hidden = true;
@@ -166,8 +177,7 @@ function frame(now = performance.now()) {
 		return;
 	}
 	app.lastAnalysis = now;
-	const { light, change, motion } = sampler.sample(els.video);
-	const result = pipeline.update(light, change, motion);
+	const result = pipeline.update(sampler.sample(els.video));
 
 	renderer.resize(els.stage.clientWidth, els.stage.clientHeight, Math.min(window.devicePixelRatio || 1, 2));
 	if (result.state === LOCKED && result.quad) {
@@ -237,6 +247,7 @@ function updateStats(result, now) {
 		`state      ${result.state}${result.coasting ? ' (coasting)' : ''}`,
 		`found via  ${result.source ?? '-'}`,
 		`restless   ${result.restless?.toFixed(1) ?? '-'}`,
+		`gyroscope  ${result.sensor ?? 'not available'}${result.stillFrames ? ` (${result.stillFrames} still)` : ''}`,
 		`confidence ${result.confidence.toFixed(2)}`,
 		`aspect     ${aspect ? aspect.toFixed(3) : '-'} (${app.pipeline.aspectMethod ?? '-'})`,
 		`edges seen ${result.edges}/4${result.blind ? ` (blind ${result.blind})` : ''}`,
@@ -268,6 +279,11 @@ async function pushZoom() {
 	} catch {
 		// Some cameras advertise a range and then refuse parts of it.
 		app.zoom = zoomRange(app.stream);
+		if (motionAllowed) {
+			app.sensor = new MotionSensor();
+			if (app.sensor.start()) app.sampler.useSensor(app.sensor);
+			else app.sensor = null;
+		}
 	}
 	app.zoomBusy = false;
 	if (app.zoomWanted !== null) pushZoom();

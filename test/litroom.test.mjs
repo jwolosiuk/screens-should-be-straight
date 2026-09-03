@@ -16,8 +16,7 @@ const maxCornerError = (found, truth) =>
 function makeStepper(pipe) {
 	const feed = new ChangeFeed();
 	return (scene) => {
-		const { light, change, motion, restless, warp } = feed.push(rgbaToChannels(scene.rgba, W, H));
-		return pipe.update(light, change, motion, restless, warp);
+		return pipe.update(feed.push(rgbaToChannels(scene.rgba, W, H)));
 	};
 }
 

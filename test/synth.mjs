@@ -15,10 +15,14 @@ export class ChangeFeed {
 		this.tracker = null;
 	}
 
-	push({ light, plain }) {
+	push({ light, plain }, sensor = null) {
 		this.tracker ??= new ChangeTracker(plain.w, plain.h, this.opts);
 		const { change, motion } = this.tracker.push(plain);
-		return { light, change, motion, restless: this.tracker.restlessness, warp: this.tracker.warp };
+		return {
+			light, change, motion, sensor,
+			restless: this.tracker.restlessness,
+			warp: this.tracker.warp,
+		};
 	}
 }
 

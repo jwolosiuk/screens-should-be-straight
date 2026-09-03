@@ -1,6 +1,7 @@
 // Camera access and per-frame grayscale downsampling.
 
 import { ChangeTracker, makeGray, rgbaToChannels } from './image.js';
+import { focalFromFov } from './aspect.js';
 
 export const CAMERA_ERRORS = {
 	NotAllowedError: 'Camera permission was refused. Allow it in the address bar, then try again.',
@@ -82,6 +83,15 @@ export class FrameSampler {
 		// does not light up the room's static edges. ChangeTracker owns all of
 		// that, including refusing to answer on pans and exposure ramps.
 		this.tracker = new ChangeTracker(this.w, this.h);
+		this.focal = focalFromFov(this.w);
+		this.sensor = null;
+	}
+
+	// A gyroscope, if the user allowed one. Everything works without it; with
+	// it, the app can tell "the room is still and that thing is moving" from
+	// "I am moving and everything appears to".
+	useSensor(sensor) {
+		this.sensor = sensor;
 	}
 
 	// One light frame, the change against the compensated reference (null when
@@ -91,7 +101,14 @@ export class FrameSampler {
 		const { data } = this.ctx.getImageData(0, 0, this.w, this.h);
 		rgbaToChannels(data, this.w, this.h, this);
 		const { change, motion } = this.tracker.push(this.plain);
-		return { light: this.light, change, motion, restless: this.tracker.restlessness, warp: this.tracker.warp };
+		return {
+			light: this.light,
+			change,
+			motion,
+			restless: this.tracker.restlessness,
+			warp: this.tracker.warp,
+			sensor: this.sensor?.read(this.focal) ?? null,
+		};
 	}
 
 	toNormalized(quad) {

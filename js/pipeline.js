@@ -67,6 +67,8 @@ export class ScreenPipeline {
 		// dilate, and the scattered activity becomes the region it belongs to,
 		// while the thin residual lines that survive motion compensation stay
 		// thin and fall away.
+		// How many still frames make the gyroscope-gated map authoritative.
+		this.stillEnough = opts.stillEnough ?? 8;
 		this.coarseStep = opts.coarseStep ?? 4;
 		// Two neighbours, not three: a film's activity at any moment is
 		// patchy, and demanding company on three sides erased a real dance
@@ -132,6 +134,11 @@ export class ScreenPipeline {
 		this.insideFactor = opts.insideFactor ?? 0.6;
 		this.edgeJump = opts.edgeJump ?? Math.max(4, 0.028 * Math.max(w, h));
 		this.settleFrames = opts.settleFrames ?? 3;
+		this.seekReach = opts.seekReach ?? 2.5;
+		this.seekFrames = opts.seekFrames ?? 15;
+		// Cinema is 2.4:1 at its widest, a phone on its side 0.56:1.
+		this.minSeedRatio = opts.minSeedRatio ?? 0.4;
+		this.maxSeedRatio = opts.maxSeedRatio ?? 4;
 		this.minEdgeFrac = opts.minEdgeFrac ?? 0.06;
 		// Slow, and gated against sudden changes: the first estimate at lock is
 		// taken as-is, and after that a real screen keeps the shape it had.
@@ -177,6 +184,10 @@ export class ScreenPipeline {
 		this.stray = 0;
 		this.settled = 0;
 		this.interiorDoubt = 0;
+		this.seeking = 0;
+		this.stillActivity = null;
+		this.stillFrames = 0;
+		this.sensor = null;
 		this.aspectMethod = null;
 		this.aspectDoubt = 0;
 		this.slips = 0;
@@ -217,6 +228,8 @@ export class ScreenPipeline {
 		this.velocity = null;
 		this.coast = 1;
 		this.settled = 0;
+		// Hand-placed corners are a seed too, and a rougher one.
+		this.seeking = this.seekFrames;
 		this.stray = 0;
 		this.blind = 0;
 		this.searchFrames = 0;
@@ -279,7 +292,9 @@ export class ScreenPipeline {
 	// within three frames of being seeded. The wall does not play a film.
 	strayLight(gray, quad) {
 		const cols = 21, rows = 16;
-		const peak = this.changeAcquirer.peak;
+		// Prefer evidence gathered while the phone was still, once there is
+		// enough of it to be worth preferring.
+		const peak = this.stillFrames >= this.stillEnough ? this.stillActivity.peak : this.changeAcquirer.peak;
 		// A guard band around the outline: motion-compensation residuals ring
 		// the screen's own high-contrast border a few pixels OUTSIDE a
 		// perfectly placed outline, and they read as bright playing picture.
@@ -360,6 +375,19 @@ export class ScreenPipeline {
 			}
 		}
 		this.changeAcquirer.push(this.filtered);
+		// The still map: change seen while the phone reported that it did not
+		// move. Residue at a hard edge exists only when the camera moves, so a
+		// map built from these moments is about things that move by
+		// themselves - which is the definition of a screen and the opposite of
+		// a wall. Without a gyroscope there is no trustworthy way to know a
+		// frame was still, so this stays empty and nothing below uses it.
+		if (this.sensor?.still) {
+			this.stillActivity ??= new Acquirer(this.w, this.h, {
+				decay: 0.985, minFill: 0.5, minStep: 12, threshold: 12,
+			});
+			this.stillActivity.push(this.filtered);
+			this.stillFrames++;
+		}
 	}
 
 	// A coarse map of where a film is playing: block-max the change peak down
@@ -376,7 +404,9 @@ export class ScreenPipeline {
 	// erosion. A screen is a region, and survives it.
 	buildCoarse() {
 		const { coarseW: cw, coarseH: ch, coarseStep: step, coarse, coarseSwap } = this;
-		const peak = this.changeAcquirer.peak;
+		// Prefer evidence gathered while the phone was still, once there is
+		// enough of it to be worth preferring.
+		const peak = this.stillFrames >= this.stillEnough ? this.stillActivity.peak : this.changeAcquirer.peak;
 		const floor = this.coarseAcquirer.threshold;
 		coarse.fill(0);
 		for (let y = 0; y < this.h; y++) {
@@ -478,6 +508,23 @@ export class ScreenPipeline {
 		return film === 0 || inside / film >= this.minFilmContainment;
 	}
 
+	insideRelief() {
+		return this.seeking > 0 || this.source !== 'light' ? 0.5 : 1;
+	}
+
+	// Roughly the proportions of a screen. A film's activity at one moment can
+	// be a horizontal band - a row of dancers, a ticker, a bright horizon -
+	// and a six-to-one sliver accepted as a seed is not merely inaccurate: its
+	// corners are the intersections of nearly parallel lines, so the smallest
+	// correction to one edge throws them across the frame.
+	screenShaped(quad) {
+		const width = (dist(quad[0], quad[1]) + dist(quad[3], quad[2])) / 2;
+		const height = (dist(quad[0], quad[3]) + dist(quad[1], quad[2])) / 2;
+		if (!(width > 0 && height > 0)) return false;
+		const ratio = width / height;
+		return ratio >= this.minSeedRatio && ratio <= this.maxSeedRatio;
+	}
+
 	// A change-sourced candidate has to look like a picture on the light
 	// channel too. A blob fused with the ghost of a dark keyboard or a chair
 	// passes every shape test on the change map and then locks a third of its
@@ -573,19 +620,27 @@ export class ScreenPipeline {
 	}
 
 	/**
-	 * @param {{data:Uint8ClampedArray, w:number, h:number}} light current frame
-	 * @param {{data:Uint8ClampedArray, w:number, h:number}|null} change
+	 * @param {object} frame one camera frame's worth of evidence
+	 * @param {{data:Uint8ClampedArray,w:number,h:number}} frame.light the
+	 *   brightness channel
+	 * @param {{data:Uint8ClampedArray,w:number,h:number}|null} frame.change
 	 *   motion-compensated difference against a rolling reference; null on the
 	 *   first frame, on pans, on exposure ramps, and in callers that have
-	 *   nothing better - everything then falls back to light.
-	 * @param {number} motion the camera's own frame-to-frame motion in pixels,
-	 *   as measured by the ChangeTracker - NOT derived from the outline, which
-	 *   a runaway outline controls.
+	 *   nothing better - everything then falls back to light
+	 * @param {number} frame.motion the camera's frame-to-frame motion in
+	 *   pixels as measured from the picture itself
+	 * @param {{shift:number, still:boolean}|null} frame.sensor the same
+	 *   question asked of the gyroscope, which no film can mislead
 	 */
-	update(light, change = null, motion = 0, restless = 0, warp = 0) {
+	update(frame) {
+		const { light, change = null, motion = 0, restless = 0, warp = 0, sensor = null } = frame;
 		this.frame++;
 		this.changeFrame = change;
-		this.cameraMotion = motion;
+		// Where the two disagree, believe whichever saw more: a pixel estimate
+		// can be dragged low by a film filling the view, and a gyroscope sees
+		// nothing of a camera sliding sideways.
+		this.cameraMotion = sensor ? Math.max(sensor.shift, motion) : motion;
+		this.sensor = sensor;
 		this.restless = restless;
 		this.warp = warp;
 		if (change) this.observeChange(change, light);
@@ -605,9 +660,37 @@ export class ScreenPipeline {
 		const inside = this.interiorStats(gray, this.measured ?? start);
 		const tracked = trackQuad(gray, start, {
 			...this.trackOpts,
-			minInside: inside.median * this.insideFactor,
+			// While seeking, the bar for "this is picture" comes down. An
+			// outline seeded on the bright half of a screen takes its own
+			// interior as the standard and then refuses to grow into the dim
+			// half - a stage lit red below and blue above is enough to do it -
+			// so the screen it settles on is the part it started with. Once
+			// settled the full bar returns, which is what keeps a projection
+			// screen's unlit margins outside the outline.
+			// The bar for "this is picture, not the margin around it" is high
+			// only where it was earned. It exists for a projection screen,
+			// whose unlit surround is brighter than the night behind it and
+			// makes a perfectly good false edge - and such a screen is always
+			// found by brightness, in a dark room. A set found by its motion
+			// is a different case: the room is lit, the picture may be dim at
+			// one border, and an outline that takes its own bright half as the
+			// standard will refuse to grow into the dark half and sit there
+			// permanently cropped.
+			minInside: inside.median * this.insideFactor * this.insideRelief(),
 			maxEdgeJump: this.edgeJump,
+			// A fresh lock looks further for its edges, for long enough to walk
+			// to them. Acquisition from change undersizes a screen whose
+			// picture is dim near one border - the blob simply stops where the
+			// film stops changing - and the ordinary search radius cannot see
+			// a bezel thirty pixels away. Nothing leaps: the per-frame jump
+			// stays clamped, so the outline walks out over a second at most.
+			// Afterwards the reach comes back in, which is what keeps a
+			// projection screen's unlit margins out of the outline.
+			radius: this.seeking > 0
+				? Math.round(this.trackOpts.radius * this.seekReach)
+				: this.trackOpts.radius,
 		});
+		if (this.seeking > 0) this.seeking--;
 		if (!tracked || !this.plausible(tracked.quad)) return this.miss(gray);
 		this.edges = tracked.edges;
 
@@ -684,7 +767,16 @@ export class ScreenPipeline {
 		// fit a translation plus a uniform scale about the centroid: two
 		// opposite edges separating is a zoom, all edges shifting together is
 		// a pan, and the direction no edge can see honestly stays put.
-		if (tracked.edges >= 1 && this.measured) {
+		if (this.seeking > 0) {
+			// No extrapolation while the outline is still finding its edges.
+			// The motion model reads a uniform scale out of perpendicular
+			// displacements, and a seed correcting one edge at a time looks
+			// exactly like a zoom: the top edge walking up to the bezel was
+			// enough to push the left edge eighty pixels off the frame.
+			// Nothing here is the camera moving - it is the outline arriving.
+			this.velocity = null;
+			this.coast = 1;
+		} else if (tracked.edges >= 1 && this.measured) {
 			this.coast = 1;
 			const c = [0, 1].map((axis) => this.measured.reduce((a, p) => a + p[axis], 0) / 4);
 			// Normal equations for (tx, ty, s), ridge-regularised.
@@ -779,7 +871,8 @@ export class ScreenPipeline {
 		if (!found && this.changeFrame && this.filmSeen()) {
 			const small = this.coarseAcquirer.detect(this.buildCoarse());
 			const moving = small ? small.map(([x, y]) => [x * this.coarseStep, y * this.coarseStep]) : null;
-			if (moving && this.plausible(moving) && this.interiorLooksLit(gray, moving)) {
+			if (moving && this.plausible(moving) && this.screenShaped(moving)
+				&& this.interiorLooksLit(gray, moving)) {
 				found = moving;
 				source = 'change';
 			}
@@ -818,6 +911,9 @@ export class ScreenPipeline {
 			// film leave the blob ragged, and the tracker needs a moment of
 			// freedom to snap outward onto the true edges.
 			this.settled = source === 'change' ? 0 : this.settleFrames;
+			// A change-sourced outline is a seed, not an answer: give it time
+			// to find the real edges before the reach narrows.
+			this.seeking = source === 'change' ? this.seekFrames : 0;
 			this.source = source;
 			this.searchFrames = 0;
 
@@ -893,6 +989,8 @@ export class ScreenPipeline {
 			edges: this.edges,
 			blind: this.blind,
 			source: this.source,
+			sensor: this.sensor ? (this.sensor.still ? 'still' : 'moving') : null,
+			stillFrames: this.stillFrames,
 			searchFrames: this.searchFrames,
 			coasting: this.state === LOCKED && (this.misses > 0 || this.blind > 0),
 		};
