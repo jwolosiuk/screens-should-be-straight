@@ -17,7 +17,13 @@ Finding those four corners, every frame, while the phone moves and the film
 underneath keeps changing, is the whole problem.
 
 **Light** (`js/image.js`). Everything downstream works on one byte per pixel,
-and what goes in that byte is not luminance. Brightness is the largest colour
+and what goes in that byte is not luminance.
+
+A caution that took three rooms to learn: brightness finds a screen in a dark
+room and nowhere else. Measured along a line through a television on a sunlit
+wall - wall 175, bezel 22, picture anywhere from 30 to 255 - the screen is not
+the brightest thing in the view, the wall is, and the only mark of the boundary
+is the thin dark bezel between them. Brightness is the largest colour
 channel, plus half the chroma. Both departures come from watching a real
 outdoor screening: projected film often sits on one saturated hue for minutes,
 and saturated colour carries little luminance - a deep red picture computes
@@ -76,9 +82,15 @@ minutes, so the trail of a person walking across the frame does not veto real
 screens after they have passed - and a bright quad that stays put for a full
 second while nothing else is lockable overrides the veto outright.
 
-**Acquire** (`js/detect.js`). With no prior guess, the screen is found as the
-bright region in a darker room - or, once a film has been seen anywhere, as the
-region where it plays. A single frame is not enough — a dark scene or
+**Acquire** (`js/detect.js`, `js/pipeline.js`). With no prior guess, the screen
+is found as the bright region in a darker room - or, once a film has been seen
+anywhere, as the region where it plays. Acquisition from change runs on a
+coarse, opened copy of the activity map: block-maximum to a quarter scale,
+eroded, then dilated. A real film does not change everywhere at once - on a
+recording of a dance performance the pixels above threshold at any moment were
+1.5% of the view and filled less than half their own outline - so without the
+dilation nothing looks like a screen, and without the erosion first, thin
+residue lines fuse the film to whatever furniture sits beside it. A single frame is not enough — a dark scene or
 a letterbox band would carve the region into pieces — so acquisition works on a
 slowly decaying per-pixel *maximum* over roughly the last second. Anything that
 lit up recently still counts as screen. The largest bright blob is hulled,

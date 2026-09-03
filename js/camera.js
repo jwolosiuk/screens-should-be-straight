@@ -91,7 +91,7 @@ export class FrameSampler {
 		const { data } = this.ctx.getImageData(0, 0, this.w, this.h);
 		rgbaToChannels(data, this.w, this.h, this);
 		const { change, motion } = this.tracker.push(this.plain);
-		return { light: this.light, change, motion, restless: this.tracker.restlessness };
+		return { light: this.light, change, motion, restless: this.tracker.restlessness, warp: this.tracker.warp };
 	}
 
 	toNormalized(quad) {

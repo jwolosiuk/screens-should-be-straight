@@ -201,20 +201,20 @@ function updateHint(result, now) {
 	if (app.adjusting) { els.hint.textContent = ''; return; }
 	if (result.state !== LOCKED) {
 		app.lockedSince = 0;
-		// "Clipped" means a playing picture demonstrably runs off the side of
-		// the view. Nothing in the frame can say where its corners are, and the
-		// fix is one the user can act on. After a while of finding nothing, say
-		// what always works instead of letting the search spin silently.
-		els.hint.textContent = result.clipped
-			? 'Zoom out until the whole screen is in view'
-			: result.searchFrames > 150
-				? 'Can\u2019t find it? Tap Adjust and drag the corners onto the screen'
-				: result.candidate ? 'Hold still\u2026' : 'Point the camera at the screen';
+		// After a while of finding nothing, say what always works instead of
+		// letting the search spin silently. There used to be a "zoom out until
+		// the whole screen is in view" here, inferred from the shape of the
+		// evidence; it was wrong often enough - and wrong in the worst way, an
+		// instruction to change something that was already right - that no
+		// version of it earned its place.
+		els.hint.textContent = result.searchFrames > 120
+			? 'Can\u2019t find it? Tap Adjust and drag the corners onto the screen'
+			: result.candidate ? 'Hold still\u2026' : 'Point the camera at the screen';
 		return;
 	}
 	if (result.coasting) {
 		els.hint.textContent = result.blind
-			? 'No edge of the screen in view - zoom out a little'
+			? 'No edge of the screen in view'
 			: 'Lost it for a moment…';
 		return;
 	}

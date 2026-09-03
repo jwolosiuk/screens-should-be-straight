@@ -16,8 +16,8 @@ const maxCornerError = (found, truth) =>
 function makeStepper(pipe) {
 	const feed = new ChangeFeed();
 	return (scene) => {
-		const { light, change, motion, restless } = feed.push(rgbaToChannels(scene.rgba, W, H));
-		return pipe.update(light, change, motion, restless);
+		const { light, change, motion, restless, warp } = feed.push(rgbaToChannels(scene.rgba, W, H));
+		return pipe.update(light, change, motion, restless, warp);
 	};
 }
 
@@ -35,16 +35,17 @@ test('locks onto the tablet, not the lamp-lit wall, and never says "zoom out"', 
 		if (out.state === LOCKED) locked = i;
 	}
 	assert.ok(locked, 'never locked onto the tablet');
-	// The change blob is conservative - quiet parts of the film leave it
-	// ragged - so the lock lands close and the tracker snaps to the true
-	// edges within a few frames.
-	assert.ok(maxCornerError(pipe.quad, tablet(0)) < 12,
+	// Acquisition from change is approximate by design - a film's activity is
+	// patchy, so the blob is ragged and the seed lands near rather than on the
+	// screen. What matters is that it lands on the SCREEN (the room would be a
+	// hundred pixels out) and that the tracker closes the gap immediately.
+	assert.ok(maxCornerError(pipe.quad, tablet(0)) < 25,
 		`locked ${maxCornerError(pipe.quad, tablet(0)).toFixed(1)}px away - probably onto the room`);
-	for (let i = 0; i < 10; i++) {
+	for (let i = 0; i < 5; i++) {
 		step(renderBedroom({ w: W, h: H, picture: tablet(0), t: locked + i, seed: 21 + locked + i }));
 	}
 	assert.ok(maxCornerError(pipe.quad, tablet(0)) < 4,
-		`settled ${maxCornerError(pipe.quad, tablet(0)).toFixed(1)}px away from the picture`);
+		`did not converge: ${maxCornerError(pipe.quad, tablet(0)).toFixed(1)}px away after five frames`);
 });
 
 test('a hand-placed outline survives in a lit room instead of self-destructing', () => {

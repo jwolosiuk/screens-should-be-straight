@@ -148,11 +148,13 @@ export class ChangeTracker {
 		this.refreshEvery = opts.refreshEvery ?? 12;
 		this.maxShift = opts.maxShift ?? 7;
 		this.globalLimit = opts.globalLimit ?? 12;
+		this.maxWarp = opts.maxWarp ?? 2.5;
 		this.reference = makeGray(w, h);
 		this.change = makeGray(w, h);
 		this.previous = makeGray(w, h);
 		this.sinceRefresh = -1;
 		this.restlessness = 0;
+		this.warp = 0;
 	}
 
 	// The 10th percentile of the change map over a sparse grid. An exposure or
@@ -254,6 +256,17 @@ export class ChangeTracker {
 		const refShift = estimateShift(plain, this.reference, this.maxShift);
 		if (refShift.saturated && motion >= 1.5) {
 			// A pan: too far from the reference to compare, and really moving.
+			this.restart(plain);
+			return { change: null, motion };
+		}
+		this.warp = refShift.saturated ? this.maxShift : Math.hypot(refShift.dx, refShift.dy);
+		// Resampling the reference softens every hard edge, and what that
+		// leaves behind grows with the distance it was dragged. Rather than
+		// try to subtract residue that has already been created, keep it from
+		// being created: once the reference has drifted more than a couple of
+		// pixels, it has served its purpose and a fresh one costs only the
+		// time base, which a moving camera was not going to give us anyway.
+		if (this.warp > this.maxWarp) {
 			this.restart(plain);
 			return { change: null, motion };
 		}

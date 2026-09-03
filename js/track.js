@@ -27,17 +27,33 @@ import { solveLinear } from './math.js';
 // Average luminance a few pixels outside a candidate border, subtracted from
 // the average a few pixels inside it. Null when too much of the window falls
 // outside the image to judge.
+// What lies either side of a candidate border: the picture inside, and the
+// DARKEST thing just outside.
+//
+// The minimum, not the mean, and this is the whole difference between working
+// in a cinema and working in a living room by daylight. Measured off a real
+// recording, a wall-mounted television against a sunlit wall reads: wall 175,
+// bezel 22, picture 30-255. The screen is not brighter than its surroundings -
+// the WALL is - and the only thing marking the boundary is the thin dark bezel
+// between them. Averaging the six pixels outside the border straddles that
+// bezel and lands on the wall, so the step comes out negative and the tracker
+// is structurally blind in a lit room.
+//
+// The minimum over a short window picks the bezel out and ignores whatever is
+// beyond it. What survives in both rooms is the same invariant: immediately
+// outside the picture there is something darker - a dark room, a black bezel,
+// a projection screen's shadowed edge - and the picture is brighter than it.
 function stepAcross(gray, px, py, nx, ny, s, near, far) {
-	let outSum = 0, outCount = 0, inSum = 0, inCount = 0;
+	let outMin = Infinity, outCount = 0, inSum = 0, inCount = 0;
 	for (let k = near; k <= far; k++) {
 		const outer = bilinear(gray, px + nx * (s - k), py + ny * (s - k));
+		if (outer >= 0) { if (outer < outMin) outMin = outer; outCount++; }
 		const inner = bilinear(gray, px + nx * (s + k), py + ny * (s + k));
-		if (outer >= 0) { outSum += outer; outCount++; }
 		if (inner >= 0) { inSum += inner; inCount++; }
 	}
 	if (outCount < 3 || inCount < 3) return null;
 	const inside = inSum / inCount;
-	return { inside, step: inside - outSum / outCount };
+	return { inside, step: inside - outMin };
 }
 
 // The border of the screen, somewhere along the inward normal from a sample
@@ -74,7 +90,7 @@ function findStep(gray, px, py, nx, ny, radius, minContrast, minStep, minInside)
 		if (i > 0 && grad[i] < grad[i - 1]) continue;
 		if (i < n - 1 && grad[i] < grad[i + 1]) continue;
 		const s = i - radius;
-		const across = stepAcross(gray, px, py, nx, ny, s, 2, 7);
+		const across = stepAcross(gray, px, py, nx, ny, s, 1, 5);
 		if (across === null || across.step < minStep) continue;
 		if (minInside > 0 && across.inside < minInside) continue;
 		let offset = 0;

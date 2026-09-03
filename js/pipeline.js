@@ -16,6 +16,7 @@
 // arbiter. A wall is bright but still; a screen is bright and moving.
 
 import { Acquirer, insideQuad } from './detect.js';
+import { makeGray } from './image.js';
 import { dist, inwardNormal, isConvex, quadArea, quadsClose } from './geom.js';
 import { QuadSmoother } from './smooth.js';
 import { defaultRadius, trackQuad } from './track.js';
@@ -56,6 +57,49 @@ export class ScreenPipeline {
 		this.changeAcquirer = new Acquirer(w, h, {
 			decay: 0.92, minFill: 0.5, minStep: 12, threshold: 12, ...opts.changeAcquire,
 		});
+		// Acquisition from change runs on a coarse, spread-out copy of that
+		// map. A film does not change everywhere at once - measured off a real
+		// recording of a dance performance on a wall-mounted television, the
+		// pixels above threshold at any moment were 1.5% of the view and
+		// filled less than half of their own outline, so the blob never looked
+		// like a screen and the app searched for three seconds at something
+		// plainly playing in front of it. Block-max to a quarter scale and
+		// dilate, and the scattered activity becomes the region it belongs to,
+		// while the thin residual lines that survive motion compensation stay
+		// thin and fall away.
+		this.coarseStep = opts.coarseStep ?? 4;
+		// Two neighbours, not three: a film's activity at any moment is
+		// patchy, and demanding company on three sides erased a real dance
+		// performance entirely while keeping a radiator's fins.
+		this.coarseErode = opts.coarseErode ?? 2;
+		this.coarseW = Math.ceil(w / this.coarseStep);
+		this.coarseH = Math.ceil(h / this.coarseStep);
+		this.coarse = new Float32Array(this.coarseW * this.coarseH);
+		this.coarseSwap = new Float32Array(this.coarseW * this.coarseH);
+		// The threshold separates a film from a room's furniture by magnitude,
+		// which is what actually distinguishes them: measured off the real
+		// recording, cells over the television read 30-80 and the fins of a
+		// radiator - regular texture, endlessly re-shifted by a hand that
+		// cannot hold still - read 10-30.
+		this.coarseAcquirer = new Acquirer(this.coarseW, this.coarseH, {
+			minFill: 0.45, minStep: 8, threshold: 28, minHullFit: 0.8, ...opts.coarseAcquire,
+		});
+		// What counts as change rises with the local gradient. A room has
+		// depth, so no single shift compensates a wall and a near table edge
+		// at once, and whatever sub-pixel error is left shows up at every hard
+		// edge as change of roughly gradient times error - a 160-level edge
+		// mis-aligned by a fifth of a pixel writes 32 into the map, far above
+		// any flat floor. Scaling the floor by the gradient asks the right
+		// question instead: not "did this pixel change" but "did it change by
+		// more than sliding the picture slightly would explain". A film
+		// changes because its content changed, and sails past; the outline of
+		// a keyboard does not.
+		this.edgeAllowance = opts.edgeAllowance ?? 0.55;
+		// Even with the camera perfectly still, resampling the reference at a
+		// fractional offset softens every hard edge, and the difference that
+		// leaves behind is a fixed fraction of the local gradient. This is the
+		// floor under the motion-scaled allowance above.
+		this.edgeFloorAllowance = opts.edgeFloorAllowance ?? 0.19;
 		// Where a film has EVER played, decaying over minutes rather than
 		// frames. This is what lets a bright still blob be judged: a screen
 		// paused mid-film still sits where the change used to be; a wall does
@@ -138,7 +182,6 @@ export class ScreenPipeline {
 		this.slips = 0;
 		this.frame = 0;
 		this.searchFrames = 0;
-		this.clippedStreak = 0;
 		this.source = null;
 		this.changeFrame = null;
 		this.longChange.fill(0);
@@ -177,7 +220,6 @@ export class ScreenPipeline {
 		this.stray = 0;
 		this.blind = 0;
 		this.searchFrames = 0;
-		this.clippedStreak = 0;
 		this.candidate = null;
 		this.candidateHits = 0;
 		this.candidateMisses = 0;
@@ -298,14 +340,79 @@ export class ScreenPipeline {
 	// Fold this frame's change into both memories. Runs in every state: the
 	// long mask has to keep filling in while locked, or the first fresh look
 	// after a lost lock would be judged against stale evidence.
-	observeChange(change) {
-		this.changeAcquirer.push(change);
-		const long = this.longChange, d = change.data, floor = this.changeFloor, decay = this.longDecay;
-		for (let i = 0; i < long.length; i++) {
-			const faded = long[i] * decay;
-			const value = d[i] - floor;
-			long[i] = value > faded ? value : faded;
+	observeChange(change, light) {
+		this.filtered ??= makeGray(this.w, this.h);
+		const { w, h } = this;
+		const d = change.data, f = this.filtered.data, g = light.data;
+		const long = this.longChange, decay = this.longDecay;
+		const allow = Math.max(this.edgeFloorAllowance, this.edgeAllowance * this.cameraMotion);
+		for (let y = 0; y < h; y++) {
+			for (let x = 0; x < w; x++) {
+				const i = y * w + x;
+				// Local gradient magnitude, clamped at the edges of the frame.
+				const gx = Math.abs(g[i + (x < w - 1 ? 1 : 0)] - g[i - (x > 0 ? 1 : 0)]);
+				const gy = Math.abs(g[i + (y < h - 1 ? w : 0)] - g[i - (y > 0 ? w : 0)]);
+				const floor = this.changeFloor + allow * (gx + gy);
+				const value = d[i] - floor;
+				f[i] = value > 0 ? d[i] : 0;
+				const faded = long[i] * decay;
+				long[i] = value > faded ? value : faded;
+			}
 		}
+		this.changeAcquirer.push(this.filtered);
+	}
+
+	// A coarse map of where a film is playing: block-max the change peak down
+	// by coarseStep, then OPEN it - erode, then dilate.
+	//
+	// Both halves earn their place. Without the dilation, a real film never
+	// looks like a screen: measured off a recording of a dance performance on
+	// a television, the pixels changing at any moment were 1.5% of the view
+	// and filled less than half their own outline, and the app searched for
+	// three seconds at something plainly playing. Without the erosion first,
+	// the dilation fuses that blob with whatever residue lies near it - the
+	// edge of a keyboard, the frame of a picture - and the outline swallows
+	// the furniture. Residue is thin: a line one or two cells wide dies in the
+	// erosion. A screen is a region, and survives it.
+	buildCoarse() {
+		const { coarseW: cw, coarseH: ch, coarseStep: step, coarse, coarseSwap } = this;
+		const peak = this.changeAcquirer.peak;
+		const floor = this.coarseAcquirer.threshold;
+		coarse.fill(0);
+		for (let y = 0; y < this.h; y++) {
+			const cy = (y / step) | 0;
+			for (let x = 0; x < this.w; x++) {
+				const v = peak[y * this.w + x];
+				const i = cy * cw + ((x / step) | 0);
+				if (v > coarse[i]) coarse[i] = v;
+			}
+		}
+		const live = (buf, x, y) => (x < 0 || y < 0 || x >= cw || y >= ch ? 0 : buf[y * cw + x] >= floor ? 1 : 0);
+		// Erode: keep only cells with company on at least three sides.
+		for (let y = 0; y < ch; y++) {
+			for (let x = 0; x < cw; x++) {
+				const i = y * cw + x;
+				const neighbours = live(coarse, x - 1, y) + live(coarse, x + 1, y)
+					+ live(coarse, x, y - 1) + live(coarse, x, y + 1);
+				coarseSwap[i] = live(coarse, x, y) && neighbours >= this.coarseErode ? coarse[i] : 0;
+			}
+		}
+		// Dilate twice, restoring the region's own extent and filling the gaps
+		// a film leaves between one moment's motion and the next.
+		for (let pass = 0; pass < 2; pass++) {
+			for (let y = 0; y < ch; y++) {
+				for (let x = 0; x < cw; x++) {
+					let m = coarseSwap[y * cw + x];
+					if (x > 0 && coarseSwap[y * cw + x - 1] > m) m = coarseSwap[y * cw + x - 1];
+					if (x < cw - 1 && coarseSwap[y * cw + x + 1] > m) m = coarseSwap[y * cw + x + 1];
+					if (y > 0 && coarseSwap[(y - 1) * cw + x] > m) m = coarseSwap[(y - 1) * cw + x];
+					if (y < ch - 1 && coarseSwap[(y + 1) * cw + x] > m) m = coarseSwap[(y + 1) * cw + x];
+					coarse[y * cw + x] = m;
+				}
+			}
+			coarseSwap.set(coarse);
+		}
+		return coarse;
 	}
 
 	// Mean of a per-pixel source over the coarse grid, inside a quad or - with
@@ -379,7 +486,7 @@ export class ScreenPipeline {
 		const stats = this.interiorStats(gray, quad);
 		if (!stats.count) return false;
 		const cols = 21, rows = 16;
-		let dark = 0, inside = 0;
+		let dead = 0, inside = 0;
 		const limit = stats.median * 0.4;
 		for (let r = 0; r < rows; r++) {
 			for (let c = 0; c < cols; c++) {
@@ -387,10 +494,15 @@ export class ScreenPipeline {
 				const y = Math.round(((r + 0.5) / rows) * this.h);
 				if (!insideQuad(quad, x, y)) continue;
 				inside++;
-				if (gray.data[y * gray.w + x] < limit) dark++;
+				// Dark AND never once seen to change. Darkness alone condemns
+				// every night scene ever filmed; a dark stage between dancers
+				// still lights up the memory over a few seconds, while a
+				// keyboard fused into the outline by motion ghosts never does.
+				if (gray.data[y * gray.w + x] < limit
+					&& this.longChange[y * this.w + x] < this.changeFloor) dead++;
 			}
 		}
-		return inside === 0 || dark / inside <= 0.15;
+		return inside === 0 || dead / inside <= 0.25;
 	}
 
 	// What the picture inside the outline looks like: its mean, and its median.
@@ -470,16 +582,18 @@ export class ScreenPipeline {
 	 *   as measured by the ChangeTracker - NOT derived from the outline, which
 	 *   a runaway outline controls.
 	 */
-	update(light, change = null, motion = 0, restless = 0) {
+	update(light, change = null, motion = 0, restless = 0, warp = 0) {
 		this.frame++;
 		this.changeFrame = change;
 		this.cameraMotion = motion;
 		this.restless = restless;
-		if (change) this.observeChange(change);
+		this.warp = warp;
+		if (change) this.observeChange(change, light);
 		// A refused frame with real motion behind it means the peak memory is
 		// full of pan smear; it takes half a second to decay below threshold
 		// on its own, and every one of those frames is a blind one. Wipe it.
 		else if (motion >= 1.5) this.changeAcquirer.reset();
+		this._lastLight = light;
 		return this.state === LOCKED ? this.follow(light) : this.search(light);
 	}
 
@@ -635,7 +749,6 @@ export class ScreenPipeline {
 
 		let found = null;
 		let source = null;
-		let clip = false;
 
 		const bright = this.acquirer.detect();
 		if (bright && this.plausible(bright)) {
@@ -663,33 +776,14 @@ export class ScreenPipeline {
 				}
 			}
 		}
-		let sawCandidate = found !== null;
 		if (!found && this.changeFrame && this.filmSeen()) {
-			const moving = this.changeAcquirer.detect();
+			const small = this.coarseAcquirer.detect(this.buildCoarse());
+			const moving = small ? small.map(([x, y]) => [x * this.coarseStep, y * this.coarseStep]) : null;
 			if (moving && this.plausible(moving) && this.interiorLooksLit(gray, moving)) {
 				found = moving;
 				source = 'change';
-				sawCandidate = true;
-			} else {
-				clip = this.changeAcquirer.clipped || this.changeAcquirer.overflow
-					|| this.changeAcquirer.touchesBorders >= 2;
 			}
 		}
-		// A static screen larger than the view: no film to see, but a single
-		// bright blob swallowing over ninety percent of the frame is its own
-		// signature. (Content the change channel cannot map at all - a fast pan
-		// filling the view - gets no hint; it falls through to the Adjust
-		// suggestion, which is less specific but never wrong.)
-		if (!found && !this.filmSeen()) clip = clip || this.acquirer.overflow;
-
-		// Evidence for, candidates against, and silence is neutral. The clip
-		// signal is periodic by nature - loud just after a shot cut, quiet
-		// between cuts, absent on frames where content motion masquerades as a
-		// pan - so consecutive-frame debouncing could never accumulate it. A
-		// frame that produced an actual screen candidate argues the framing is
-		// fine; a frame that produced nothing at all argues nothing.
-		if (clip) this.clippedStreak = Math.min(20, this.clippedStreak + 3);
-		else if (sawCandidate) this.clippedStreak = Math.max(0, this.clippedStreak - 1);
 
 		// One good-looking frame is not enough: a passing reflection can produce
 		// a convincing quad. Require the same outline several times over - but
@@ -726,7 +820,6 @@ export class ScreenPipeline {
 			this.settled = source === 'change' ? 0 : this.settleFrames;
 			this.source = source;
 			this.searchFrames = 0;
-			this.clippedStreak = 0;
 
 			this.smoother.reset(found);
 			this.quad = this.smoother.quad;
@@ -799,10 +892,6 @@ export class ScreenPipeline {
 			restless: this.restless,
 			edges: this.edges,
 			blind: this.blind,
-			// Only the change channel earns this message: it means a playing
-			// picture demonstrably runs off the side of the view. The light
-			// channel used to say it about a bedroom wall.
-			clipped: this.state === SEARCHING && this.clippedStreak >= 12,
 			source: this.source,
 			searchFrames: this.searchFrames,
 			coasting: this.state === LOCKED && (this.misses > 0 || this.blind > 0),

@@ -18,7 +18,7 @@ export class ChangeFeed {
 	push({ light, plain }) {
 		this.tracker ??= new ChangeTracker(plain.w, plain.h, this.opts);
 		const { change, motion } = this.tracker.push(plain);
-		return { light, change, motion, restless: this.tracker.restlessness };
+		return { light, change, motion, restless: this.tracker.restlessness, warp: this.tracker.warp };
 	}
 }
 
@@ -322,6 +322,81 @@ export function renderBedroom({
 			}
 			const i = (y * w + x) * 4;
 			const noise = (rand() - 0.5) * 7;
+			rgba[i] = colour[0] + noise;
+			rgba[i + 1] = colour[1] + noise;
+			rgba[i + 2] = colour[2] + noise;
+			rgba[i + 3] = 255;
+		}
+	}
+	return { rgba, w, h };
+}
+
+// A living room by daylight with a television on the wall - built from
+// measurements off a real recording of this app failing in exactly this
+// scene, not from imagination. The numbers that matter, taken along a
+// horizontal line through the set: wall 175, bezel 22, picture anywhere
+// between 30 and 255.
+//
+// That ordering is the whole point. The screen is NOT the brightest thing
+// here - the sunlit wall is - and the only thing marking the boundary is the
+// thin dark bezel between them. Every earlier scene in this suite was a dark
+// room where brightness alone found the screen, and the app was structurally
+// blind here as a result. The radiator is in the picture for the same reason:
+// its regular fins, re-shifted by every tremor of a hand, produced as much
+// change as the film did.
+export function renderDaylightRoom({
+	w, h, picture, t = 0, seed = 41, shake = 0, mirror = true, paused = false,
+}) {
+	const rgba = new Uint8ClampedArray(w * h * 4);
+	const rand = prng(seed);
+	const time = paused ? 0 : t;
+	const grow = (quad, fraction) => {
+		const cx = quad.reduce((s, p) => s + p[0], 0) / 4;
+		const cy = quad.reduce((s, p) => s + p[1], 0) / 4;
+		return quad.map(([x, y]) => [cx + (x - cx) * (1 + fraction), cy + (y - cy) * (1 + fraction)]);
+	};
+	const bezel = grow(picture, 0.06);
+	// A small copy of the set, reflected in a mirror further along the wall.
+	const reflection = picture.map(([x, y]) => [w * 0.78 + (x - picture[0][0]) * 0.32, h * 0.12 + (y - picture[0][1]) * 0.32]);
+	const mirrorFrame = grow(reflection, 1.9);
+	const inv = (quad) => mat3Invert(solveHomography(UNIT_SQUARE, quad));
+	const toPicture = inv(picture), toBezel = inv(bezel);
+	const toReflection = inv(reflection), toMirror = inv(mirrorFrame);
+	const within = (H, x, y) => {
+		const uv = mat3Apply(H, x, y);
+		return uv && uv[0] >= 0 && uv[0] <= 1 && uv[1] >= 0 && uv[1] <= 1 ? uv : null;
+	};
+	// A stage: dark ground, saturated wash, a couple of bright figures moving
+	// across it. Most of the picture is DIMMER than the wall behind the set.
+	const shot = Math.floor(time / 40);
+	const stage = (u, v) => {
+		const dancer = Math.hypot(u - (0.3 + 0.4 * Math.abs(((time * 0.02 + shot) % 2) - 1)), v - 0.55) < 0.13;
+		const other = Math.hypot(u - (0.72 - 0.25 * Math.sin(time * 0.05)), v - 0.6) < 0.1;
+		if (dancer || other) return [235, 225, 240];
+		const wash = v < 0.45 ? [40, 30, 90] : [150, 25, 60];
+		const glow = 30 * Math.sin(u * 6 + time * 0.04);
+		return [wash[0] + glow, wash[1] + glow * 0.4, wash[2] + glow * 0.6];
+	};
+	for (let y = 0; y < h; y++) {
+		for (let x = 0; x < w; x++) {
+			const px = x + 0.5 + shake, py = y + 0.5 + shake * 0.5;
+			let colour;
+			const inPicture = within(toPicture, px, py);
+			const inReflection = mirror && within(toReflection, px, py);
+			if (inPicture) colour = stage(inPicture[0], inPicture[1]);
+			else if (inReflection) colour = stage(inReflection[0], inReflection[1]).map((c) => c * 0.75);
+			else if (within(toBezel, px, py) || (mirror && within(toMirror, px, py))) colour = [24, 24, 28];
+			else if (py > h * 0.82) colour = [150, 112, 78];
+			else if (px > w * 0.86 && py > h * 0.45) {
+				// Radiator: white, with regular vertical fins.
+				const fin = ((px / 5) | 0) % 2 === 0 ? 0 : -35;
+				colour = [236 + fin, 234 + fin, 230 + fin];
+			} else {
+				const daylight = 12 * (1 - py / h);
+				colour = [198 + daylight, 194 + daylight, 184 + daylight];
+			}
+			const i = (y * w + x) * 4;
+			const noise = (rand() - 0.5) * 6;
 			rgba[i] = colour[0] + noise;
 			rgba[i + 1] = colour[1] + noise;
 			rgba[i + 2] = colour[2] + noise;

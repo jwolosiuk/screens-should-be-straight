@@ -14,8 +14,8 @@ const frameAt = (i, opts = {}) =>
 function feeder(pipe) {
 	const feed = new ChangeFeed();
 	return (gray) => {
-		const { light, change, motion, restless } = feed.push({ light: gray, plain: gray });
-		return pipe.update(light, change, motion, restless);
+		const { light, change, motion, restless, warp } = feed.push({ light: gray, plain: gray });
+		return pipe.update(light, change, motion, restless, warp);
 	};
 }
 
@@ -242,25 +242,27 @@ test('an obstruction that takes the outline with it is noticed and undone', () =
 	// steady camera, which is the price of not false-firing in a lit room.
 	assert.ok(worst < 200, `drifted ${worst.toFixed(0)}px before noticing`);
 });
-test('a screen larger than the view is reported as clipped, not half-locked', () => {
+test('a screen larger than the view is never mistaken for one, and never argued with', () => {
+	// Standing too close: every corner outside the view, the room barely
+	// visible around the edges. The app must not lock onto the shape of the
+	// viewport - and it must not instruct the user either. It used to say
+	// "zoom out until the whole screen is in view", inferred from where the
+	// evidence touched the borders. On a real recording of a television
+	// framed perfectly in the middle of a living room, it said exactly that,
+	// twice, for seconds at a time. No version of the inference survived
+	// contact with a real room, and an instruction to fix something that is
+	// not broken is worse than silence.
 	const pipe = new ScreenPipeline(W, H);
 	const step = feeder(pipe);
-	// Every corner outside the view, but the room still visible around the
-	// screen - which is what standing too close actually looks like. The film
-	// has cuts and local motion, like films do; content that is one perpetual
-	// full-speed pan defeats motion compensation entirely and falls through to
-	// the Adjust suggestion instead - a documented limit.
 	const huge = [[-60, -40], [380, -45], [385, 285], [-70, 280]];
 	const filmish = (u, v, t) => {
 		const shot = Math.floor(t / 12);
 		const blob = Math.hypot(u - (0.5 + 0.3 * Math.sin(shot + t * 0.1)), v - 0.5) < 0.18 ? 60 : 0;
 		return Math.max(0, Math.min(255, 120 + blob + 30 * Math.sin(u * 9 + shot * 2 + t * 0.05)));
 	};
-	let sawClipped = false;
 	for (let i = 0; i < 45; i++) {
 		const out = step(renderScene({ w: W, h: H, quad: huge, t: i, seed: 7 + i, content: filmish }));
 		assert.equal(out.state, SEARCHING, 'locked onto the shape of the viewport');
-		sawClipped ||= out.clipped;
+		assert.equal(out.clipped, undefined, 'the app should have no opinion about the framing');
 	}
-	assert.ok(sawClipped, 'should say the screen runs off the view, so the user can zoom out');
 });

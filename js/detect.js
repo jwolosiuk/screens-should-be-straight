@@ -117,7 +117,7 @@ export class Acquirer {
 		const { hist } = this;
 		this.clipped = false;
 		this.overflow = false;
-		this.touchesBorders = 0;
+		this.blobFraction = 0;
 		const peak = source;
 		const total = peak.length;
 		let threshold = this.threshold;
@@ -128,30 +128,7 @@ export class Acquirer {
 		}
 		const blob = this.largestComponent(threshold, peak);
 		if (!blob) return null;
-		// How many of the view's four borders the blob reaches. The quad-corner
-		// check below jitters when the blob breathes (a quiet strip of film
-		// near the frame edge drops out for a few frames); the bounding box
-		// does not, and a blob leaning on two or more borders is the steady
-		// signature of a screen that does not fit in the view.
-		{
-			const margin = 1.5;
-			let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
-			for (const [x, y] of blob.points) {
-				if (x < minX) minX = x;
-				if (x > maxX) maxX = x;
-				if (y < minY) minY = y;
-				if (y > maxY) maxY = y;
-			}
-			this.touchesBorders = (minX <= margin) + (maxX >= this.w - 1 - margin)
-				+ (minY <= margin) + (maxY >= this.h - 1 - margin);
-		}
-		if (blob.size < total * this.minAreaFrac) return null;
-		// Too big is not the same as absent: on the change channel, a blob
-		// filling the whole view means the screen runs off every side of it.
-		if (blob.size > total * this.maxAreaFrac) {
-			this.overflow = true;
-			return null;
-		}
+		this.blobFraction = blob.size / total;
 		const hull = convexHull(blob.points);
 		if (hull.length < 4) return null;
 		const quad = maxAreaQuad(simplifyPolygon(hull, 2, 4));

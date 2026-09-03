@@ -106,12 +106,15 @@ const setFrame = (quad, t, still = false) => {
 // ~38Hz by wall time, and synchronous ticks sharing a timestamp would all take
 // the render-only path, never re-running the pipeline or the hints.
 let mockNow = performance.now();
+const hintsSeen = [];
 const tick = () => {
 	assert.ok(pending, 'the app stopped asking for frames');
 	const cb = pending;
 	pending = null;
 	mockNow += 33;
 	cb(mockNow);
+	const text = document.getElementById('hint').textContent;
+	if (text && !hintsSeen.includes(text)) hintsSeen.push(text);
 };
 
 // Start: the click has to come from a user gesture in a real browser, which is
@@ -225,10 +228,15 @@ assert.equal(document.getElementById('adjust-bar').hidden, true, 'adjust bar sho
 document.getElementById('btn-rescan').click();
 setFrame(orbitQuad(0, { still: true }), 0);
 tick();
+const hintText = document.getElementById('hint').textContent;
 assert.ok(
-	['Point the camera at the screen', 'Hold still…'].includes(document.getElementById('hint').textContent),
-	`re-scan should go back to searching, hint was "${document.getElementById('hint').textContent}"`,
+	['Point the camera at the screen', 'Hold still…'].includes(hintText),
+	`re-scan should go back to searching, hint was "${hintText}"`,
 );
+// Nothing in the run may have told the user to re-frame a shot that was
+// already framed: that inference was wrong in the field, repeatedly.
+assert.ok(!hintsSeen.some((text) => /zoom out until/i.test(text)),
+	`the app must not tell the user to zoom out; saw: ${hintsSeen.join(' | ')}`);
 
 document.getElementById('btn-stop').click();
 assert.equal(document.getElementById('stage').hidden, true, 'stopping should return to the intro');
